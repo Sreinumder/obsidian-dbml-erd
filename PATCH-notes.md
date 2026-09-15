@@ -93,6 +93,41 @@ right:12px`) and covered it. Fixed by moving the plugin toolbar to the
 **bottom-left** (`bottom:10px; left:12px`), so the native edit/copy controls
 stay reachable and the whole feature is unhidden on very top right corner.
 
+### 4. Fixed: fullscreen/focus lost on interaction (state survives re-renders)
+
+**The bug.** Three symptoms shared one root cause — Obsidian **re-renders the code
+block** whenever the plugin writes layout data to the note (`vault.process()` in
+`saveLayout`), destroying the current block and mounting a fresh one with no
+memory of the runtime state:
+
+- **Zooming** (`+`/`−`) scheduled a save → re-render → the old block's
+  `onunload()` called `document.exitFullscreen()` → user kicked out of fullscreen.
+- **Focus mode** (`focusTable`/pair) called `fit(true)` → save → re-render → the
+  new block mounted with `focus = null` → focus visibly "reverted" moments later.
+- **Right-clicking a table** opened Obsidian's native code-block context menu on
+  top of the plugin's own menu; the extra overlay made Chromium exit fullscreen.
+
+**The fix.**
+
+- **State survives re-renders.** The plugin now keeps `focusState`
+  (`sourcePath#lineStart` → focused table names) and `fullscreenBlock`
+  (source path) and restores both on mount. Entering fullscreen through a
+  helper (`enterFullscreen`) that only records the state if the request actually
+  succeeds (self-healing if it's rejected during a re-render race).
+- **No premature fullscreen exit.** `onunload` no longer calls
+  `exitFullscreen()` (the browser exits naturally when the fullscreen element is
+  removed; explicit exit was what broke re-render continuity).
+- **No saves while focused.** `scheduleSaveLayout` is a no-op while focus mode
+  is active — the compact arrangement and zoomed view are transient and must not
+  be persisted (which is what triggered the self-inflicted re-render).
+- **Auto-restore fullscreen.** A `fullscreenchange` observer re-enters
+  fullscreen automatically if the plugin still expects this block to be
+  fullscreen and the exit was *not* user-initiated (Escape or the `⛶` button
+  mark `userExitFs`). Menu-driven and re-render exits bounce right back.
+- **Native context menu suppressed.** Right-click inside the diagram no longer
+  raises Obsidian's duplicate code-block menu on top of the plugin's own
+  menus.
+
 ## Files changed vs upstream
 
 | File | Change |

@@ -48,6 +48,10 @@ export default class DbmlErdPlugin extends Plugin {
   // arista seleccionada por bloque (sourcePath#lineStart); sobrevive a los
   // re-render del code block para no perder los handles al guardar el layout.
   selByBlock = new Map<string, string | undefined>();
+  // estado de enfoque por bloque; sobrevive a re-renders (vault.process re-render)
+  focusState = new Map<string, string[]>();
+  // ruta del bloque que está en pantalla completa (para restaurar tras re-render)
+  fullscreenBlock: string | null = null;
   // cache de layout ELK por estructura DBML (ignorando @pos/@view/@size/@edge):
   // así los re-render que dispara guardar el layout no recalculan ELK ni
   // muestran el placeholder async (esa pausa era el "parpadeo" visible).
@@ -203,6 +207,7 @@ class Diagram extends MarkdownRenderChild {
   private focusBtn?: HTMLButtonElement;
   private focusLabel?: HTMLElement;
   private fullscreenBtn?: HTMLButtonElement;
+  private userExitFs = false;
   private hostFsed = false;
   // en modo enfoque las tablas se re-dispersan en una fila compacta (se ignora
   // la posición/orientación original); este mapa se descarta al salir.
@@ -263,6 +268,12 @@ class Diagram extends MarkdownRenderChild {
       const prev = this.plugin?.selByBlock.get(this.selKey);
       if (prev && this.model.refs.some((r) => this.edgeKey(r) === prev))
         this._selectedEdge = prev;
+      // restaura el modo enfoque sobreviviendo al re-render (vault.process)
+      const savedFocus = this.plugin?.focusState.get(this.selKey);
+      if (savedFocus && savedFocus.length) {
+        this.focus = new Set(savedFocus);
+        this.layoutPos = this.layoutCompact(this.focus);
+      }
     }
 
     const host = parent.createDiv({ cls: "dbml-erd-canvas" });
@@ -316,17 +327,44 @@ class Diagram extends MarkdownRenderChild {
       if (activeDocument.fullscreenElement === this.hostEl ||
           (activeDocument.fullscreenElement === null && this.hostFsed))
         activeWindow.requestAnimationFrame(() => this.fit(false));
-      this.hostFsed = activeDocument.fullscreenElement === this.hostEl;
+      this.hostFsed = fs;
+      // Pantalla salida por algo ajeno al usuario (menú de Obsidian, re-render
+      // del bloque, etc.): el plugin aún espera este bloque en fullscreen -> se
+      // vuelve a entrar automáticamente. El usuario no sale por aquí más que
+      // con Escape/⛶ (que marcan userExitFs).
+      if (
+        !fs &&
+        this.ctx &&
+        this.plugin?.fullscreenBlock === this.ctx.sourcePath &&
+        !this.userExitFs
+      ) {
+        activeWindow.requestAnimationFrame(() => this.enterFullscreen());
+      }
+      if (fs) this.userExitFs = false;
     });
+    // si se restauró el modo enfoque al montar, el ✕ y la etiqueta del toolbar
+    // (creados antes de ese restore) deben reflejar el estado actual
+    this.updateFocusUI();
 
     this.drawNodes();
     this.redrawEdges();
     this.redrawHandles(); // muestra handles si se restauró una selección
     this.bindPanZoom(host);
     this.bindResize(host);
+    // el plugin abre sus propios menús (tabla/columna/arista): el contextmenu
+    // nativo de Obsidian (menú duplicado del code block) se descarta para no
+    // abrir un segundo overlay que saca del modo pantalla completa en Electron.
+    this.registerDomEvent(host, "contextmenu", (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
     this.applyView();
     // si no hay vista guardada, encuadrar tras montar (necesita medidas del host)
     if (!opts?.view) activeWindow.requestAnimationFrame(() => this.fit());
+    // restaura la pantalla completa del bloque si sobrevivió a un re-render
+    if (this.ctx && this.plugin?.fullscreenBlock === this.ctx.sourcePath) {
+      activeWindow.requestAnimationFrame(() => this.enterFullscreen());
+    }
     // Esc: cierra el panel de referencias o sale del modo enfoque (salvo que
     // haya un menú/modal abierto, que gestiona su propia tecla Escape).
     this.registerDomEvent(activeWindow, "keydown", (e: KeyboardEvent) => {
@@ -334,6 +372,12 @@ class Diagram extends MarkdownRenderChild {
       if (this.refPanel) {
         this.closeRefPanel();
         return;
+      }
+      // si está en fullscreen, Esc es del navegador: marcar como salida del
+      // usuario para que fullscreenchange no vuelva a entrar automáticamente
+      if (activeDocument.fullscreenElement === this.hostEl) {
+        this.userExitFs = true;
+        if (this.plugin) this.plugin.fullscreenBlock = null;
       }
       if (!this.focus) return;
       if (activeDocument.querySelector(".menu, .modal-container")) return;
@@ -346,9 +390,10 @@ class Diagram extends MarkdownRenderChild {
     this.colorInput?.remove();
     this.colorInput = undefined;
     this.closeRefPanel();
-    // si el bloque está en pantalla completa, salir (evita huérfanos al cerrar)
-    if (activeDocument.fullscreenElement === this.hostEl)
-      void activeDocument.exitFullscreen();
+    // NO salir de pantalla aquí: vault.process dispara re-render → onunload
+    // del bloque viejo. Si llamamos exitFullscreen(), el bloque nuevo se monta
+    // sin pantalla completa. El navegador gestiona la salida naturalmente cuando
+    // el elemento se elimina del DOM.
   }
 
   private btn(bar: HTMLElement, label: string, cb: () => void) {
@@ -364,10 +409,27 @@ class Diagram extends MarkdownRenderChild {
 
   private toggleFullscreen() {
     if (activeDocument.fullscreenElement === this.hostEl) {
+      this.userExitFs = true;
+      if (this.plugin) this.plugin.fullscreenBlock = null;
       void activeDocument.exitFullscreen();
     } else {
-      void this.hostEl?.requestFullscreen?.().catch?.(() => {});
+      this.enterFullscreen();
     }
+  }
+
+  // pide pantalla completa y solo recuerda el estado si la entrada tiene éxito;
+  // si falla (p.ej. durante un re-render) se limpia la marca para no arrastrar
+  // al usuario a un fullscreen que no llega a darse en un siguiente re-render.
+  private enterFullscreen() {
+    this.hostEl?.requestFullscreen?.()
+      .then(() => {
+        this.userExitFs = false;
+        if (this.ctx && this.plugin)
+          this.plugin.fullscreenBlock = this.ctx.sourcePath;
+      })
+      .catch(() => {
+        if (this.plugin) this.plugin.fullscreenBlock = null;
+      });
   }
 
   // fila compacta (tablas pegadas, ignorando su posición original) para las
@@ -1098,13 +1160,26 @@ class Diagram extends MarkdownRenderChild {
   // en el panel de referencias: clic izdo -> enfoca solo esa tabla.
   private focusTable(name: string) {
     this.focus = new Set([name]);
+    this.saveFocusState();
     this.applyFocusView();
   }
 
   // clic derecho: trae la tabla referenciada junto a la actual (ambas a cuadro).
   private focusPair(a: string, b: string) {
     this.focus = new Set([a, b]);
+    this.saveFocusState();
     this.applyFocusView();
+  }
+
+  // persiste el estado de enfoque en el plugin para que sobreviva a re-renders
+  // (guardar layout con vault.process re-renderiza el bloque).
+  private saveFocusState() {
+    if (!this.plugin || !this.selKey) return;
+    if (this.focus && this.focus.size) {
+      this.plugin.focusState.set(this.selKey, [...this.focus]);
+    } else {
+      this.plugin.focusState.delete(this.selKey);
+    }
   }
 
   // ⊡ del toolbar o menú "Show all": vuelve al diagrama completo.
@@ -1114,6 +1189,7 @@ class Diagram extends MarkdownRenderChild {
     this.closeRefPanel();
     this.layoutPos = null; // descarta el arreglo compacto
     if (hadFocus) {
+      this.saveFocusState();
       this.redrawNodes();
       this.redrawEdges();
       this.redrawHandles();
@@ -1726,6 +1802,10 @@ class Diagram extends MarkdownRenderChild {
 
   // ---- guardado de posiciones / vista ----
   private scheduleSaveLayout() {
+    // No persistir mientras el modo enfoque está activo: la disposición compacta
+    // y la vista con zoom son transitorias. Guardar aquí dispararía un re-render
+    // que destruiría el bloque actual y perdería el enfoque/pantalla completa.
+    if (this.focus) return;
     if (this.saveTimer) activeWindow.clearTimeout(this.saveTimer);
     this.saveTimer = activeWindow.setTimeout(() => this.saveLayout(), 600);
   }
