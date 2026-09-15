@@ -126,11 +126,14 @@
   fill: var(--background-primary);
 }
 
-/* toolbar */
+/* toolbar (esquina inferior izquierda: la superior derecha la ocupa el botón
+   nativo "Edit this block" de Obsidian, que así queda siempre accesible) */
 .dbml-erd-toolbar {
   position: absolute;
-  top: 10px;
-  right: 12px;
+  top: auto;
+  right: auto;
+  bottom: 10px;
+  left: 12px;
   display: flex;
   gap: 6px;
   z-index: 5;
@@ -148,6 +151,91 @@
 }
 .dbml-erd-toolbar button:hover {
   border-color: var(--interactive-accent);
+}
+.dbml-erd-toolbar button.focus-exit {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+/* tabla enfocada (modo enfoque) */
+.dbml-node-focus .dbml-body {
+  stroke: var(--interactive-accent);
+  stroke-width: 2.5;
+}
+
+/* contadores de referencias en la cabecera */
+.dbml-ref-badge {
+  cursor: pointer;
+}
+.dbml-ref-badge-bg {
+  fill: var(--background-primary);
+  stroke: var(--background-modifier-border);
+  stroke-width: 1;
+  pointer-events: all;
+}
+.dbml-ref-badge.in .dbml-ref-badge-bg {
+  stroke: var(--text-accent);
+}
+.dbml-ref-badge-txt {
+  fill: var(--text-normal);
+  font-size: 10px;
+  font-weight: 700;
+  pointer-events: none;
+}
+.dbml-ref-badge.in .dbml-ref-badge-txt {
+  fill: var(--text-accent);
+}
+
+/* panel de referencias (lista entrantes/salientes) */
+.dbml-refpanel {
+  position: absolute;
+  z-index: 6;
+  min-width: 220px;
+  max-width: 340px;
+  max-height: 60%;
+  overflow: auto;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+  padding: 6px 8px;
+}
+.dbml-refpanel-head {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  padding: 2px 4px 6px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  margin-bottom: 4px;
+}
+.dbml-refpanel-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.dbml-refpanel-row:hover {
+  background: var(--background-modifier-hover);
+}
+.dbml-refpanel-arrow {
+  font-weight: 700;
+  color: var(--text-accent);
+}
+.dbml-refpanel-target {
+  font-weight: 600;
+  font-size: 13px;
+}
+.dbml-refpanel-cols {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--font-monospace);
+}
+.dbml-refpanel-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 4px;
 }
 
 /* input de color oculto fuera de pantalla (estilos estáticos en CSS, no por JS) */

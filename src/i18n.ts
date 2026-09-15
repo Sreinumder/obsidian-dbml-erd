@@ -50,6 +50,16 @@ const en: Dict = {
   changeTypeFail:
     "Could not change the type (use letters, numbers, _ and parentheses).",
   tableNotFound: 'DBML ERD: table "{name}" was not found.',
+  // refs / focus
+  refOutBadge: "{n} outgoing references",
+  refInBadge: "{n} incoming references",
+  refHeadingOut: "References from {table}",
+  refHeadingIn: "References to {table}",
+  refHint: "Left click: focus this table  •  Right click: show both tables",
+  refNoRefs: "No references",
+  focusOn: "Focus on this table",
+  showAll: "Show all tables",
+  exitFocus: "Exit focus mode",
   // modals
   cancel: "Cancel",
   save: "Save",
@@ -92,6 +102,15 @@ const es: Dict = {
   changeTypeFail:
     "No se pudo cambiar el tipo (use letras, números, _ y paréntesis).",
   tableNotFound: 'DBML ERD: no se encontró la tabla "{name}".',
+  refOutBadge: "{n} referencias salientes",
+  refInBadge: "{n} referencias entrantes",
+  refHeadingOut: "Referencias desde {table}",
+  refHeadingIn: "Referencias hacia {table}",
+  refHint: "Clic izquierdo: enfocar esta tabla  •  Clic derecho: mostrar ambas",
+  refNoRefs: "Sin referencias",
+  focusOn: "Enfocar esta tabla",
+  showAll: "Mostrar todas las tablas",
+  exitFocus: "Salir del modo enfoque",
   cancel: "Cancelar",
   save: "Guardar",
   settingsLanguage: "Idioma",

@@ -196,6 +196,11 @@ class Diagram extends MarkdownRenderChild {
   private edgeLayer: SVGGElement;
   private nodeLayer: SVGGElement;
   private handleLayer: SVGGElement;
+  // modo enfoque: solo se dibujan estas tablas (null = diagrama completo).
+  private focus: Set<string> | null = null;
+  private refPanel?: HTMLElement;
+  private refPanelCleanup?: () => void;
+  private focusBtn?: HTMLButtonElement;
 
   constructor(
     parent: HTMLElement,
@@ -273,11 +278,18 @@ class Diagram extends MarkdownRenderChild {
     this.svg.appendChild(this.vp);
     host.appendChild(this.svg);
 
-    // toolbar
+    // toolbar (esquina inferior izquierda: la superior derecha corresponde al
+    // botón nativo "Edit this block" de Obsidian, que debe quedar accesible).
     const bar = host.createDiv({ cls: "dbml-erd-toolbar" });
     this.btn(bar, "+", () => this.zoom(1.15));
     this.btn(bar, "−", () => this.zoom(0.87));
-    this.btn(bar, "⊡", () => this.fit(true));
+    this.btn(bar, "⊡", () => this.fitAll());
+    const fb = bar.createEl("button", { text: "✕" });
+    fb.classList.add("focus-exit");
+    fb.title = t("exitFocus");
+    fb.style.display = "none";
+    this.focusBtn = fb;
+    this.registerDomEvent(fb, "click", () => this.exitFocus());
 
     this.drawNodes();
     this.redrawEdges();
@@ -287,12 +299,25 @@ class Diagram extends MarkdownRenderChild {
     this.applyView();
     // si no hay vista guardada, encuadrar tras montar (necesita medidas del host)
     if (!opts?.view) activeWindow.requestAnimationFrame(() => this.fit());
+    // Esc: cierra el panel de referencias o sale del modo enfoque (salvo que
+    // haya un menú/modal abierto, que gestiona su propia tecla Escape).
+    this.registerDomEvent(activeWindow, "keydown", (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (this.refPanel) {
+        this.closeRefPanel();
+        return;
+      }
+      if (!this.focus) return;
+      if (activeDocument.querySelector(".menu, .modal-container")) return;
+      this.exitFocus();
+    });
   }
 
   onunload() {
     if (this.saveTimer) activeWindow.clearTimeout(this.saveTimer);
     this.colorInput?.remove();
     this.colorInput = undefined;
+    this.closeRefPanel();
   }
 
   private btn(bar: HTMLElement, label: string, cb: () => void) {
@@ -500,7 +525,11 @@ class Diagram extends MarkdownRenderChild {
   private redrawEdges() {
     while (this.edgeLayer.firstChild)
       this.edgeLayer.removeChild(this.edgeLayer.firstChild);
+    // en modo enfoque solo se dibujan las aristas con ambos extremos visibles
+    const vis = this.visibleTables();
+    const visSet = new Set(vis.map((v) => v.name));
     this.model.refs.forEach((r, i) => {
+      if (this.focus && (!visSet.has(r.from) || !visSet.has(r.to))) return;
       const pts = this.edgePts(r, i);
       if (pts && pts.length >= 2) this.drawEdge(r, pts, this.edgeKey(r));
     });
@@ -675,6 +704,7 @@ class Diagram extends MarkdownRenderChild {
 
   // ---- edición de aristas ----
   private refresh() {
+    this.redrawNodes();
     this.redrawEdges();
     this.redrawHandles();
   }
@@ -803,6 +833,9 @@ class Diagram extends MarkdownRenderChild {
     );
     if (i < 0) return;
     const r = this.model.refs[i];
+    // en modo enfoque una arista con extremos ocultos no muestra handles
+    if (this.focus && (!this.focus.has(r.from) || !this.focus.has(r.to)))
+      return;
     const key = this.selectedEdge;
     const pts = this.edgePts(r, i);
     if (!pts || pts.length < 2) return;
@@ -949,13 +982,197 @@ class Diagram extends MarkdownRenderChild {
     });
   }
 
+  // ---- modo enfoque / referencias ----
+  private visibleTables(): Model["tables"] {
+    return this.focus && this.focus.size
+      ? this.model.tables.filter((x) => this.focus!.has(x.name))
+      : this.model.tables;
+  }
+
+  private redrawNodes() {
+    while (this.nodeLayer.firstChild)
+      this.nodeLayer.removeChild(this.nodeLayer.firstChild);
+    this.drawNodes();
+  }
+
+  private updateFocusUI() {
+    if (!this.focusBtn) return;
+    const active = !!this.focus && this.focus.size > 0;
+    this.focusBtn.style.display = active ? "" : "none";
+  }
+
+  private applyFocusView() {
+    this.closeRefPanel();
+    this.redrawNodes();
+    this.redrawEdges();
+    this.redrawHandles();
+    this.updateFocusUI();
+    this.fit(true);
+  }
+
+  // en el panel de referencias: clic izdo -> enfoca solo esa tabla.
+  private focusTable(name: string) {
+    this.focus = new Set([name]);
+    this.applyFocusView();
+  }
+
+  // clic derecho: trae la tabla referenciada junto a la actual (ambas a cuadro).
+  private focusPair(a: string, b: string) {
+    this.focus = new Set([a, b]);
+    this.applyFocusView();
+  }
+
+  // ⊡ del toolbar o menú "Show all": vuelve al diagrama completo.
+  private fitAll() {
+    const hadFocus = !!this.focus;
+    this.focus = null;
+    this.closeRefPanel();
+    if (hadFocus) {
+      this.redrawNodes();
+      this.redrawEdges();
+      this.redrawHandles();
+      this.updateFocusUI();
+    }
+    this.fit(true);
+  }
+
+  private exitFocus() {
+    if (!this.focus) {
+      this.closeRefPanel();
+      return;
+    }
+    this.fitAll();
+  }
+
+  // recorta el nombre de la cabecera para que no invada los contadores.
+  private fitToPx(s: string, maxPx: number): string {
+    const max = Math.floor(maxPx / 7.6);
+    if (max <= 0) return "…";
+    if (s.length <= max) return s;
+    return s.slice(0, Math.max(1, max - 1)) + "…";
+  }
+
+  // contadores "→n" (salientes) y "←n" (entrantes) en la cabecera de la tabla.
+  private drawRefBadges(g: SVGGElement, outN: number, inN: number) {
+    const bh = 16,
+      y = (HEAD_H - bh) / 2;
+    let right = NODE_W - 6;
+    const badge = (dir: "in" | "out", n: number) => {
+      const bw = 14 + (1 + String(n).length) * 8;
+      const bg = activeDocument.createElementNS(NS, "g");
+      bg.classList.add("dbml-ref-badge", dir);
+      bg.setAttribute("data-dir", dir);
+      const tt = activeDocument.createElementNS(NS, "title");
+      tt.textContent =
+        dir === "in"
+          ? t("refInBadge", { n: String(n) })
+          : t("refOutBadge", { n: String(n) });
+      bg.appendChild(tt);
+      const r = this.rect(right - bw, y, bw, bh, "dbml-ref-badge-bg");
+      r.setAttribute("rx", "8");
+      bg.appendChild(r);
+      const txt = this.text(
+        right - bw + 7,
+        y + bh / 2 + 3.5,
+        `${dir === "in" ? "←" : "→"}${n}`,
+        "dbml-ref-badge-txt"
+      );
+      bg.appendChild(txt);
+      g.appendChild(bg);
+      right -= bw + 4;
+    };
+    if (outN > 0) badge("out", outN);
+    if (inN > 0) badge("in", inN);
+  }
+
+  // panel desplegable con la lista de referencias entrantes/salientes. Cada fila:
+  // clic izdo -> foco en esa tabla; clic derecho -> foco en ambas (tabla + ref).
+  private openRefPanel(table: string, dir: "in" | "out", evt: PointerEvent) {
+    if (!this.hostEl) return;
+    this.closeRefPanel();
+    const panel = this.hostEl.createDiv({ cls: "dbml-refpanel" });
+    this.refPanel = panel;
+
+    const headKey =
+      dir === "out"
+        ? t("refHeadingOut", { table })
+        : t("refHeadingIn", { table });
+    const refs = this.model.refs.filter((r) =>
+      dir === "out" ? r.from === table : r.to === table
+    );
+    panel.createDiv({ cls: "dbml-refpanel-head", text: headKey });
+    if (!refs.length) {
+      panel.createDiv({ cls: "dbml-refpanel-empty", text: t("refNoRefs") });
+    }
+    refs.forEach((r) => {
+      const target = dir === "out" ? r.to : r.from;
+      const row = panel.createDiv({ cls: "dbml-refpanel-row" });
+      row.setAttribute("data-table", target);
+      row.createSpan({
+        cls: "dbml-refpanel-arrow",
+        text: dir === "out" ? "→" : "←",
+      });
+      const info = row.createDiv({ cls: "dbml-refpanel-main" });
+      info.createDiv({ cls: "dbml-refpanel-target", text: target });
+      const cols =
+        dir === "out"
+          ? `${r.from}.${r.fromCol} → ${r.to}.${r.toCol}`
+          : `${r.to}.${r.toCol} ← ${r.from}.${r.fromCol}`;
+      info.createDiv({ cls: "dbml-refpanel-cols", text: cols });
+      row.title = t("refHint");
+      row.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.focusTable(target);
+      });
+      row.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.focusPair(table, target);
+      });
+    });
+
+    const hostRect = this.hostEl.getBoundingClientRect();
+    let px = evt.clientX - hostRect.left;
+    let py = evt.clientY - hostRect.top;
+    panel.style.left = px + "px";
+    panel.style.top = py + "px";
+    const pw = panel.offsetWidth;
+    const ph = panel.offsetHeight;
+    panel.style.left = Math.max(6, Math.min(px, hostRect.width - pw - 6)) + "px";
+    panel.style.top = Math.max(6, Math.min(py, hostRect.height - ph - 6)) + "px";
+
+    const onAway = (e: PointerEvent) => {
+      const tgt = e.target as Element;
+      if (tgt.closest?.(".dbml-refpanel")) return;
+      this.closeRefPanel();
+    };
+    activeDocument.addEventListener("pointerdown", onAway, true);
+    activeDocument.addEventListener("contextmenu", onAway, true);
+    this.refPanelCleanup = () => {
+      activeDocument.removeEventListener("pointerdown", onAway, true);
+      activeDocument.removeEventListener("contextmenu", onAway, true);
+    };
+  }
+
+  private closeRefPanel() {
+    this.refPanel?.remove();
+    this.refPanel = undefined;
+    if (this.refPanelCleanup) {
+      this.refPanelCleanup();
+      this.refPanelCleanup = undefined;
+    }
+  }
+
   // ---- dibujo de nodos ----
   private drawNodes() {
     this.model.tables.forEach((t) => {
       const P = this.pos[t.name];
       if (!P) return;
+      // modo enfoque: oculta el resto de tablas
+      if (this.focus && !this.focus.has(t.name)) return;
       const g = activeDocument.createElementNS(NS, "g");
       g.classList.add("dbml-node");
+      if (this.focus) g.classList.add("dbml-node-focus");
       g.setAttribute("transform", `translate(${P.x},${P.y})`);
       // nota de tabla: tooltip nativo al pasar el ratón por la cabecera (y por
       // cualquier fila sin nota propia, ya que <title> busca el ancestro más
@@ -976,7 +1193,18 @@ class Diagram extends MarkdownRenderChild {
       g.appendChild(head);
       const headFix = this.rect(0, HEAD_H - 8, NODE_W, 8, "dbml-head");
       g.appendChild(headFix);
-      const headTxt = this.text(14, HEAD_H / 2 + 4, t.name, "dbml-head-txt");
+      const outN = this.model.refs.filter((r) => r.from === t.name).length;
+      const inN = this.model.refs.filter((r) => r.to === t.name).length;
+      const badgeW = (n: number) =>
+        n > 0 ? 14 + (1 + String(n).length) * 8 + 4 : 0;
+      const reserve = badgeW(outN) + badgeW(inN) + 6;
+      const shown = this.fitToPx(t.name, NODE_W - 14 - reserve);
+      const headTxt = this.text(14, HEAD_H / 2 + 4, shown, "dbml-head-txt");
+      if (shown !== t.name) {
+        const tt = activeDocument.createElementNS(NS, "title");
+        tt.textContent = t.name;
+        headTxt.appendChild(tt);
+      }
       g.appendChild(headTxt);
       if (t.headerColor) {
         // variables CSS (no estilos estáticos inline): styles.css las consume
@@ -984,6 +1212,7 @@ class Diagram extends MarkdownRenderChild {
         const tc = this.readableText(t.headerColor);
         if (tc) g.style.setProperty("--dbml-head-txt-fill", tc);
       }
+      this.drawRefBadges(g, outN, inN);
 
       t.cols.forEach((c, i) => {
         // grupo por fila: su <title> convierte el hover de toda la columna en
@@ -1129,7 +1358,8 @@ class Diagram extends MarkdownRenderChild {
       dragging = false,
       moved = false,
       onHeader = false,
-      colIdx = -1;
+      colIdx = -1,
+      badgeDir: "in" | "out" | null = null;
     // Pointer capture: mv/up se enganchan al propio nodo (elemento propio que
     // se libera con el DOM al descargar), no a window -> sin fugas de listeners.
     g.addEventListener("pointerdown", (ev: PointerEvent) => {
@@ -1141,6 +1371,12 @@ class Diagram extends MarkdownRenderChild {
       onHeader =
         tgt.classList.contains("dbml-head") ||
         tgt.classList.contains("dbml-head-txt");
+      const bdg = tgt.closest?.(".dbml-ref-badge");
+      badgeDir = bdg
+        ? bdg.getAttribute("data-dir") === "in"
+          ? "in"
+          : "out"
+        : null;
       const ca = tgt.getAttribute("data-col");
       colIdx = ca !== null ? parseInt(ca, 10) : -1;
       sx = ev.clientX;
@@ -1180,14 +1416,16 @@ class Diagram extends MarkdownRenderChild {
           this.scheduleSaveLayout();
         } else if (e.type === "pointercancel") {
           // gesto abortado: no abrir menú
-        } else if (onHeader || colIdx >= 0) {
+        } else if (onHeader || colIdx >= 0 || badgeDir) {
           // Evita que este pointerup llegue a document: el Menu de Obsidian
           // registra ahí su listener de auto-cierre y, en táctil, el mismo
           // evento (o un click/touchend sintético) cerraría el menú al instante.
           e.stopPropagation();
           e.preventDefault();
           const ev = e;
-          if (onHeader) {
+          if (badgeDir) {
+            setTimeout(() => this.openRefPanel(name, badgeDir!, ev), 0);
+          } else if (onHeader) {
             setTimeout(() => this.openHeaderMenu(name, ev), 0);
           } else {
             setTimeout(() => this.openColumnMenu(name, colIdx, ev), 0);
@@ -1232,6 +1470,22 @@ class Diagram extends MarkdownRenderChild {
         .setTitle(t("removeColor"))
         .setIcon("rotate-ccw")
         .onClick(() => this.setHeaderColor(name, null))
+    );
+    menu.addSeparator();
+    if (this.focus) {
+      menu.addItem((i) =>
+        i
+          .setTitle(t("showAll"))
+          .setIcon("maximize")
+          .onClick(() => this.exitFocus())
+      );
+      menu.addSeparator();
+    }
+    menu.addItem((i) =>
+      i
+        .setTitle(t("focusOn"))
+        .setIcon("crosshair")
+        .onClick(() => this.focusTable(name))
     );
     menu.addSeparator();
     menu.addItem((i) =>
@@ -1549,17 +1803,24 @@ class Diagram extends MarkdownRenderChild {
       psx = 0,
       psy = 0,
       pvx = 0,
-      pvy = 0;
+      pvy = 0,
+      clickedEmpty = false,
+      panned = false;
     this.registerDomEvent(host, "pointerdown", (e: PointerEvent) => {
       const tgt = e.target as Element;
       if (tgt.closest(".dbml-node")) return;
       if (tgt.closest(".dbml-edge-hit") || tgt.closest(".dbml-edge-handle"))
+        return;
+      // el panel de referencias y el toolbar no inician panning ni salen de foco
+      if (tgt.closest(".dbml-refpanel") || tgt.closest(".dbml-erd-toolbar"))
         return;
       // clic en vacío: deselecciona la arista activa
       if (this.selectedEdge) {
         this.selectedEdge = undefined;
         this.refresh();
       }
+      clickedEmpty = true;
+      panned = false;
       panning = true;
       host.addClass("panning");
       psx = e.clientX;
@@ -1569,6 +1830,7 @@ class Diagram extends MarkdownRenderChild {
     });
     this.registerDomEvent(activeWindow, "pointermove", (e: PointerEvent) => {
       if (!panning) return;
+      if (Math.hypot(e.clientX - psx, e.clientY - psy) > 4) panned = true;
       this.view.x = pvx + (e.clientX - psx);
       this.view.y = pvy + (e.clientY - psy);
       this.applyView();
@@ -1577,6 +1839,16 @@ class Diagram extends MarkdownRenderChild {
       if (!panning) return;
       panning = false;
       host.removeClass("panning");
+      // clic (sin arrastre) en el vacío mientras hay foco: se sale del enfoque
+      if (clickedEmpty && !panned) {
+        clickedEmpty = false;
+        if (this.focus) {
+          this.exitFocus();
+          return;
+        }
+      }
+      clickedEmpty = false;
+      panned = false;
       this.scheduleSaveLayout();
     });
     this.registerDomEvent(host, "wheel", (e: WheelEvent) => {
@@ -1613,7 +1885,8 @@ class Diagram extends MarkdownRenderChild {
       minY = 1e9,
       maxX = -1e9,
       maxY = -1e9;
-    for (const t of this.model.tables) {
+    // encuadra solo lo visible: si hay modo enfoque, solo las tablas enfocadas
+    for (const t of this.visibleTables()) {
       const P = this.pos[t.name];
       if (!P) continue;
       minX = Math.min(minX, P.x);
