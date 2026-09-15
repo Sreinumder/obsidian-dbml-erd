@@ -128,13 +128,37 @@ memory of the runtime state:
   raises Obsidian's duplicate code-block menu on top of the plugin's own
   menus.
 
+### 5. Full-window renderer with toggleable code panel (branch `feat/focus-and-ref-ui`)
+
+- **`⤢` toolbar button** (only in the in-note block) opens the diagram in a
+  **separate full-window overlay** — `ErdWindowModal`, an Obsidian `Modal` whose
+  container fills the viewport *and* asks the browser for real fullscreen on open
+  (graceful fallback to the overlay if fullscreen is rejected). It renders a
+  **fresh full diagram** (not the current focus), so it's a clean "presentation"
+  view of the whole schema.
+- **Toggleable read-only code panel.** The overlay header has `Code`, `Copy DBML`
+  and `Close` buttons. The right-hand panel shows the exact DBML source of the
+  block (issues no edits) with a one-click copy to clipboard.
+- **Reuses the ELK layout cache.** New plugin helper `layoutFor(source, model)`
+  keys on the DBML with `@pos/@view/@size/@edge` lines stripped, so opening the
+  window doesn't recompute a layout already computed for the block. The modal
+  deep-copies the node positions before handing them to `Diagram`, so dragging in
+  the overlay never mutates the shared cache.
+- **`Diagram` gains `opts.window`.** When set (overlay mode) the in-block-only
+  chrome is skipped: the `⛶` fullscreen button, the `fullscreenchange` observer,
+  the fullscreen auto-restore, the `⤢` button (avoids recursion) and the global
+  Escape handler (the `Modal` owns Escape). Focus/ref-badges/pan-zoom all still
+  work inside the overlay.
+- **New i18n keys:** `windowOpen`, `windowTitle`, `windowCode`, `windowCopy`,
+  `windowCopied`, `windowCopyError`, `windowExit` (en + es).
+
 ## Files changed vs upstream
 
 | File | Change |
 |---|---|
-| `src/main.ts` | hover tooltips + menus (`drawNodes`, `openHeaderMenu/ColumnMenu`, `short`); focus mode + reference panel (`visibleTables`, `redrawNodes`, `focusTable`, `focusPair`, `fitAll`, `exitFocus`, `drawRefBadges`, `openRefPanel`, `closeRefPanel`, `updateFocusUI`, `fitToPx`); compact re-layout of focused tables (`layoutCompact`, `px()` accessor, focus-aware `redrawEdges`/`edgePts`/`fit`, drag writes to `layoutPos`, `@pos` persistence keeps original coords); toolbar `✕` + focus label + `⛶` fullscreen button (`toggleFullscreen`, `fullscreenchange` refit, exit on unload); Escape handler; empty-canvas click exits focus; toolbar/panel excluded from panning |
-| `src/i18n.ts` | new keys: `refOutBadge`, `refInBadge`, `refHeadingOut/In`, `refHint`, `refNoRefs`, `focusOn`, `showAll`, `exitFocus`, `fullscreen`, `fullscreenExit` (en + es) |
-| `styles.css` | toolbar → bottom-left; `.focus-exit` button; `.dbml-focus-label`; `.dbml-node-focus` outline; `.dbml-ref-badge*` pills; `.dbml-refpanel*` list; `:fullscreen` sizing |
+| `src/main.ts` | hover tooltips + menus (`drawNodes`, `openHeaderMenu/ColumnMenu`, `short`); focus mode + reference panel (`visibleTables`, `redrawNodes`, `focusTable`, `focusPair`, `fitAll`, `exitFocus`, `drawRefBadges`, `openRefPanel`, `closeRefPanel`, `updateFocusUI`, `fitToPx`); compact re-layout of focused tables (`layoutCompact`, `px()` accessor, focus-aware `redrawEdges`/`edgePts`/`fit`, drag writes to `layoutPos`, `@pos` persistence keeps original coords); toolbar `✕` + focus label + `⛶` fullscreen button (`toggleFullscreen`, `fullscreenchange` refit, exit on unload); Escape handler; empty-canvas click exits focus; toolbar/panel excluded from panning; `ErdWindowModal` full-window overlay + `Diagram.openWindow()` + `opts.window` mode + plugin `layoutFor()` cache helper |
+| `src/i18n.ts` | new keys: `refOutBadge`, `refInBadge`, `refHeadingOut/In`, `refHint`, `refNoRefs`, `focusOn`, `showAll`, `exitFocus`, `fullscreen`, `fullscreenExit`, `windowOpen`, `windowTitle`, `windowCode`, `windowCopy`, `windowCopied`, `windowCopyError`, `windowExit` (en + es) |
+| `styles.css` | toolbar → bottom-left; `.focus-exit` button; `.dbml-focus-label`; `.dbml-node-focus` outline; `.dbml-ref-badge*` pills; `.dbml-refpanel*` list; `:fullscreen` sizing; `.erd-window*` overlay + code-panel styles |
 | `main.js` | rebuilt via `npm run build` after the source edits |
 
 Everything else remains as upstream 0.1.21 (`manifest.json`, `versions.json`).

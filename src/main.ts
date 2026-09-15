@@ -88,6 +88,20 @@ export default class DbmlErdPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
+  // layout ELK con cache (misma clave que renderBlock): lo reutiliza el modo
+  // "ventana" para no recalcular el layout al abrir el diagrama en un overlay.
+  async layoutFor(source: string, model: Model): Promise<LayoutResult> {
+    const layoutKey = source
+      .replace(/^[ \t]*\/\/[ \t]*@(pos|view|size|edge)\b.*$/gm, "")
+      .trim();
+    let layout = this.layoutCache.get(layoutKey);
+    if (!layout) {
+      layout = await computeLayout(model);
+      this.layoutCache.set(layoutKey, layout);
+    }
+    return layout;
+  }
+
   async renderBlock(
     source: string,
     el: HTMLElement,
@@ -229,6 +243,9 @@ class Diagram extends MarkdownRenderChild {
       view?: { x: number; y: number; k: number };
       size?: { w: number; h: number };
       savedEdges?: Record<string, { x: number; y: number }[]>;
+      // true = montado dentro de la ventana/overlay (ErdWindowModal): se
+      // omiten fullscreen propio, botón ⤢ y el handler de Escape del bloque.
+      window?: boolean;
     }
   ) {
     super(parent);
@@ -314,34 +331,43 @@ class Diagram extends MarkdownRenderChild {
     const fl = bar.createSpan({ cls: "dbml-focus-label" });
     fl.style.display = "none";
     this.focusLabel = fl;
-    // pantalla completa (el bloque se expande a toda la ventana)
-    const full = bar.createEl("button", { text: "⛶" });
-    full.title = t("fullscreen");
-    this.fullscreenBtn = full;
-    this.registerDomEvent(full, "click", () => this.toggleFullscreen());
-    this.registerDomEvent(activeDocument, "fullscreenchange", () => {
-      const fs = activeDocument.fullscreenElement === this.hostEl;
-      if (this.fullscreenBtn)
-        this.fullscreenBtn.title = t(fs ? "fullscreenExit" : "fullscreen");
-      // al entrar y al salir el bloque cambia de tamaño: re-encuadrar
-      if (activeDocument.fullscreenElement === this.hostEl ||
-          (activeDocument.fullscreenElement === null && this.hostFsed))
-        activeWindow.requestAnimationFrame(() => this.fit(false));
-      this.hostFsed = fs;
-      // Pantalla salida por algo ajeno al usuario (menú de Obsidian, re-render
-      // del bloque, etc.): el plugin aún espera este bloque en fullscreen -> se
-      // vuelve a entrar automáticamente. El usuario no sale por aquí más que
-      // con Escape/⛶ (que marcan userExitFs).
-      if (
-        !fs &&
-        this.ctx &&
-        this.plugin?.fullscreenBlock === this.ctx.sourcePath &&
-        !this.userExitFs
-      ) {
-        activeWindow.requestAnimationFrame(() => this.enterFullscreen());
-      }
-      if (fs) this.userExitFs = false;
-    });
+    // apertura en ventana/overlay a pantalla completa (fuera del code block)
+    if (!opts?.window) {
+      const win = bar.createEl("button", { text: "⤢" });
+      win.title = t("windowOpen");
+      this.registerDomEvent(win, "click", () => void this.openWindow());
+    }
+    // pantalla completa (el bloque se expande a toda la ventana). En el overlay
+// (opts.window) no se ofrece: la ventana ya ocupa todo y gestiona su fullscreen.
+    if (!opts?.window) {
+      const full = bar.createEl("button", { text: "⛶" });
+      full.title = t("fullscreen");
+      this.fullscreenBtn = full;
+      this.registerDomEvent(full, "click", () => this.toggleFullscreen());
+      this.registerDomEvent(activeDocument, "fullscreenchange", () => {
+        const fs = activeDocument.fullscreenElement === this.hostEl;
+        if (this.fullscreenBtn)
+          this.fullscreenBtn.title = t(fs ? "fullscreenExit" : "fullscreen");
+        // al entrar y al salir el bloque cambia de tamaño: re-encuadrar
+        if (activeDocument.fullscreenElement === this.hostEl ||
+            (activeDocument.fullscreenElement === null && this.hostFsed))
+          activeWindow.requestAnimationFrame(() => this.fit(false));
+        this.hostFsed = fs;
+        // Pantalla salida por algo ajeno al usuario (menú de Obsidian, re-render
+        // del bloque, etc.): el plugin aún espera este bloque en fullscreen -> se
+        // vuelve a entrar automáticamente. El usuario no sale por aquí más que
+        // con Escape/⛶ (que marcan userExitFs).
+        if (
+          !fs &&
+          this.ctx &&
+          this.plugin?.fullscreenBlock === this.ctx.sourcePath &&
+          !this.userExitFs
+        ) {
+          activeWindow.requestAnimationFrame(() => this.enterFullscreen());
+        }
+        if (fs) this.userExitFs = false;
+      });
+    }
     // si se restauró el modo enfoque al montar, el ✕ y la etiqueta del toolbar
     // (creados antes de ese restore) deben reflejar el estado actual
     this.updateFocusUI();
@@ -361,28 +387,32 @@ class Diagram extends MarkdownRenderChild {
     this.applyView();
     // si no hay vista guardada, encuadrar tras montar (necesita medidas del host)
     if (!opts?.view) activeWindow.requestAnimationFrame(() => this.fit());
-    // restaura la pantalla completa del bloque si sobrevivió a un re-render
-    if (this.ctx && this.plugin?.fullscreenBlock === this.ctx.sourcePath) {
-      activeWindow.requestAnimationFrame(() => this.enterFullscreen());
+    // en el code block se gestiona fullscreen y Escape; en la ventana (overlay)
+    // eso lo hace el propio ErdWindowModal, así que aquí no se registran.
+    if (!opts?.window) {
+      // restaura la pantalla completa del bloque si sobrevivió a un re-render
+      if (this.ctx && this.plugin?.fullscreenBlock === this.ctx.sourcePath) {
+        activeWindow.requestAnimationFrame(() => this.enterFullscreen());
+      }
+      // Esc: cierra el panel de referencias o sale del modo enfoque (salvo que
+      // haya un menú/modal abierto, que gestiona su propia tecla Escape).
+      this.registerDomEvent(activeWindow, "keydown", (e: KeyboardEvent) => {
+        if (e.key !== "Escape") return;
+        if (this.refPanel) {
+          this.closeRefPanel();
+          return;
+        }
+        // si está en fullscreen, Esc es del navegador: marcar como salida del
+        // usuario para que fullscreenchange no vuelva a entrar automáticamente
+        if (activeDocument.fullscreenElement === this.hostEl) {
+          this.userExitFs = true;
+          if (this.plugin) this.plugin.fullscreenBlock = null;
+        }
+        if (!this.focus) return;
+        if (activeDocument.querySelector(".menu, .modal-container")) return;
+        this.exitFocus();
+      });
     }
-    // Esc: cierra el panel de referencias o sale del modo enfoque (salvo que
-    // haya un menú/modal abierto, que gestiona su propia tecla Escape).
-    this.registerDomEvent(activeWindow, "keydown", (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      if (this.refPanel) {
-        this.closeRefPanel();
-        return;
-      }
-      // si está en fullscreen, Esc es del navegador: marcar como salida del
-      // usuario para que fullscreenchange no vuelva a entrar automáticamente
-      if (activeDocument.fullscreenElement === this.hostEl) {
-        this.userExitFs = true;
-        if (this.plugin) this.plugin.fullscreenBlock = null;
-      }
-      if (!this.focus) return;
-      if (activeDocument.querySelector(".menu, .modal-container")) return;
-      this.exitFocus();
-    });
   }
 
   onunload() {
@@ -430,6 +460,21 @@ class Diagram extends MarkdownRenderChild {
       .catch(() => {
         if (this.plugin) this.plugin.fullscreenBlock = null;
       });
+  }
+
+  // abre el diagrama en un overlay a pantalla completa (ErdWindowModal), con el
+  // código DBML en un panel lateral conmutable. Lee el bloque desde el archivo.
+  private async openWindow() {
+    if (!this.plugin || !this.ctx || !this.blockEl) return;
+    const info = this.ctx.getSectionInfo(this.blockEl);
+    if (!info) return;
+    const file = this.plugin.app.vault.getAbstractFileByPath(this.ctx.sourcePath);
+    if (!(file instanceof TFile)) return;
+    const data = await this.plugin.app.vault.read(file);
+    const lines = data.split("\n");
+    // contenido del bloque (sin las vallas ```dbml)
+    const src = lines.slice(info.lineStart + 1, info.lineEnd).join("\n");
+    new ErdWindowModal(this.plugin.app, this.plugin, src).open();
   }
 
   // fila compacta (tablas pegadas, ignorando su posición original) para las
@@ -2077,6 +2122,108 @@ class Diagram extends MarkdownRenderChild {
     this.view.y = pad - minY * this.view.k;
     this.applyView();
     if (persist) this.scheduleSaveLayout();
+  }
+}
+
+// Ventana/overlay a pantalla completa con el ERD (siempre a pantalla completa)
+// y un panel lateral conmutable con el código DBML (solo lectura + copiar).
+class ErdWindowModal extends Modal {
+  private plugin: DbmlErdPlugin;
+  private source: string;
+  private diagram?: Diagram;
+  private codePanel?: HTMLElement;
+  private codeBtn?: HTMLButtonElement;
+  private codeOpen = true;
+
+  constructor(app: App, plugin: DbmlErdPlugin, source: string) {
+    super(app);
+    this.plugin = plugin;
+    this.source = source;
+  }
+
+  onOpen() {
+    this.containerEl.addClass("erd-window-container");
+    this.modalEl.addClass("erd-window");
+    this.contentEl.addClass("erd-window-content");
+
+    const head = this.contentEl.createDiv({ cls: "erd-window-head" });
+    head.createSpan({ cls: "erd-window-title", text: t("windowTitle") });
+
+    const codeBtn = head.createEl("button", { text: t("windowCode") });
+    codeBtn.classList.add("erd-window-btn", "is-active");
+    this.codeBtn = codeBtn;
+    codeBtn.addEventListener("click", () => {
+      this.codeOpen = !this.codeOpen;
+      codeBtn.classList.toggle("is-active", this.codeOpen);
+      this.codePanel?.toggleClass("hidden", !this.codeOpen);
+    });
+
+    const copyBtn = head.createEl("button", { text: t("windowCopy") });
+    copyBtn.classList.add("erd-window-btn");
+    copyBtn.addEventListener("click", () => {
+      void navigator.clipboard.writeText(this.source).then(
+        () => new Notice(t("windowCopied")),
+        () => new Notice(t("windowCopyError"))
+      );
+    });
+
+    const exitBtn = head.createEl("button", { text: t("windowExit") });
+    exitBtn.classList.add("erd-window-btn", "erd-window-exit");
+    exitBtn.addEventListener("click", () => this.close());
+
+    const body = this.contentEl.createDiv({ cls: "erd-window-body" });
+    const draw = body.createDiv({ cls: "erd-window-draw" });
+    const code = body.createDiv({ cls: "erd-window-code" });
+    this.codePanel = code;
+    code.createEl("pre").createEl("code", { text: this.source });
+
+    void this.renderDiagram(draw);
+
+    // "siempre a pantalla completa": se pide fullscreen al abrir; si el entorno
+    // lo rechaza, el overlay ya ocupa toda la ventana de todos modos.
+    this.containerEl.requestFullscreen?.().catch(() => {});
+  }
+
+  private async renderDiagram(host: HTMLElement) {
+    try {
+      const model = parseDBML(this.source);
+      if (!model.tables.length) {
+        host.createDiv({ cls: "dbml-erd-wrap", text: t("noTables") });
+        return;
+      }
+      const layout = await this.plugin.layoutFor(this.source, model);
+      // copia defensiva: el Diagram mueve/edita nodos y no queremos tocar la
+      // caché compartida de layouts.
+      const nodes: LayoutResult["nodes"] = {};
+      for (const [k, v] of Object.entries(layout.nodes)) nodes[k] = { ...v };
+      this.diagram = new Diagram(
+        host,
+        model,
+        { nodes, edges: layout.edges },
+        {
+          plugin: this.plugin,
+          window: true,
+          savedPos: parsePositions(this.source),
+          view: parseView(this.source) ?? undefined,
+          size: parseSize(this.source) ?? undefined,
+          savedEdges: parseEdges(this.source),
+        }
+      );
+    } catch (e) {
+      host.createDiv({
+        cls: "dbml-erd-wrap",
+        text: t("layoutError", { msg: e instanceof Error ? e.message : String(e) }),
+      });
+    }
+  }
+
+  onClose() {
+    this.diagram?.unload();
+    this.diagram = undefined;
+    // salir de fullscreen si este overlay lo poseía
+    if (activeDocument.fullscreenElement === this.containerEl)
+      activeDocument.exitFullscreen?.().catch(() => {});
+    this.contentEl.empty();
   }
 }
 

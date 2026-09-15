@@ -282,3 +282,90 @@
   gap: 8px;
   justify-content: flex-end;
 }
+
+/* ---- ventana ERD (overlay a pantalla completa con panel de código) ---- */
+.erd-window-container.modal-container {
+  z-index: 100;
+}
+.erd-window.modal {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: 100%;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  background: var(--background-primary);
+}
+.erd-window-content.modal-content {
+  height: 100%;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.erd-window-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.erd-window-title {
+  margin-right: auto;
+  font-weight: 700;
+}
+.erd-window-btn {
+  padding: 4px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+.erd-window-btn:hover {
+  border-color: var(--interactive-accent);
+}
+.erd-window-btn.is-active,
+.erd-window-exit {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+.erd-window-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.erd-window-draw {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+.erd-window-draw .dbml-erd-canvas {
+  height: 100%;
+  --dbml-erd-height: 100%;
+  resize: none;
+}
+.erd-window-code {
+  flex: none;
+  width: 380px;
+  max-width: 45%;
+  overflow: auto;
+  border-left: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  transition: width 0.15s ease;
+}
+.erd-window-code.hidden {
+  width: 0;
+  border-left: none;
+  overflow: hidden;
+}
+.erd-window-code pre {
+  margin: 0;
+  padding: 12px;
+  white-space: pre;
+  color: var(--text-normal);
+  font-size: 12px;
+  line-height: 1.5;
+}
