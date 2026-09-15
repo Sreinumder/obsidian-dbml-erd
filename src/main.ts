@@ -25,8 +25,10 @@ import {
   LAYOUT_KINDS,
   parseLayout,
   parseLayoutLocked,
+  parseFocusOn,
   layoutLine,
   layoutLockLine,
+  focusOnLine,
 } from "./parser";
 import {
   computeLayout,
@@ -192,6 +194,7 @@ export default class DbmlErdPlugin extends Plugin {
           savedEdges,
           layout: kind,
           layoutLocked: parseLayoutLocked(source),
+          focus: parseFocusOn(source) ?? undefined,
         })
       );
     } catch (e) {
@@ -240,6 +243,10 @@ class Diagram extends MarkdownRenderChild {
   private handleLayer: SVGGElement;
   // modo enfoque: solo se dibujan estas tablas (null = diagrama completo).
   private focus: Set<string> | null = null;
+  // true solo dentro de la ventana/overlay a pantalla completa (ErdWindowModal):
+  // el diagrama incrustado en la nota es ESTÁTICO — cualquier clic abre la
+  // ventana y no hay pan/zoom/arrastre (sus interacciones resultaron inestables).
+  private interactive: boolean;
   private refPanel?: HTMLElement;
   private refPanelCleanup?: () => void;
   // salto a la posición del código (overlay): click derecho en tabla/columna.
@@ -274,6 +281,10 @@ class Diagram extends MarkdownRenderChild {
   // dropdown panel (buscador + tabla de tablas enfocadas/todas)
   private dropdownPanel?: HTMLElement;
   private dropdownBtn?: HTMLButtonElement;
+  // toolbar de enfoque: ⊞ (alternar) + "Quitar todas"/"Salir" (solo en enfoque)
+  private focusBtn?: HTMLButtonElement;
+  private clearAllBtn?: HTMLButtonElement;
+  private exitBtn?: HTMLButtonElement;
   // menú de zooms estándar (al hacer clic en el porcentaje de la barra)
   private zoomMenu?: HTMLElement;
 
@@ -299,6 +310,8 @@ class Diagram extends MarkdownRenderChild {
       layout?: LayoutKind;
       // layout locked: impide el arrastre de tablas/aristas.
       layoutLocked?: boolean;
+      // tablas inicialmente enfocadas (anotación `// @focusOn` del archivo).
+      focus?: string[];
     }
   ) {
     super(parent);
@@ -312,6 +325,11 @@ class Diagram extends MarkdownRenderChild {
     this.ctx = opts?.ctx;
     this.blockEl = opts?.el;
     this.onJump = opts?.onJump;
+    this.interactive = !!opts?.window;
+    // el foco solo aplica dentro de la ventana (el incrustado estático siempre
+    // muestra el diagrama completo; la anotación vive en el archivo).
+    if (opts?.focus?.length && this.interactive)
+      this.focus = new Set(opts.focus);
 
     // aplica posiciones guardadas (override del layout ELK): solo tienen
     // sentido en los layouts jerárquicos; en radial/organic se descartan.
@@ -337,11 +355,16 @@ class Diagram extends MarkdownRenderChild {
 
     // restaura la selección de arista de un render previo del mismo bloque
     // (los handles deben reaparecer aunque Obsidian re-renderice al guardar).
-    if (this.ctx && this.blockEl) {
+    // Solo en la ventana: el incrustado estático ignora el foco.
+    if (this.interactive && this.ctx && this.blockEl) {
       const info = this.ctx.getSectionInfo(this.blockEl);
       this.selKey = `${this.ctx.sourcePath}#${info ? info.lineStart : 0}`;
-      // restaura el modo enfoque sobreviviendo al re-render (vault.process)
-      const savedFocus = this.plugin?.focusState.get(this.selKey);
+      // restaura el modo enfoque sobreviviendo al re-render (vault.process).
+      // Prioridad: la anotación `// @focusOn` del archivo; si no, el estado en
+      // memoria del plugin (lo que quede de antes de persistir).
+      const savedFocus = opts?.focus?.length
+        ? opts.focus
+        : this.plugin?.focusState.get(this.selKey);
       if (savedFocus && savedFocus.length) {
         this.focus = new Set(savedFocus);
         this.layoutPos = this.layoutCompact(this.focus);
@@ -372,86 +395,102 @@ class Diagram extends MarkdownRenderChild {
     this.svg.appendChild(this.vp);
     host.appendChild(this.svg);
 
-    // toolbar (esquina inferior izquierda: la superior derecha corresponde al
-    // botón nativo "Edit this block" de Obsidian, que debe quedar accesible).
-    const bar = host.createDiv({ cls: "dbml-erd-toolbar" });
-    this.btn(bar, "−", () => this.zoom(0.87));
-    const zp = bar.createSpan({ cls: "dbml-zoom-pct", text: "100%" });
-    this.zoomPct = zp;
-    // clic en el porcentaje: menú desplegable con zooms estándar
-    zp.title = t("zoomPick");
-    this.registerDomEvent(zp, "click", (ev) => {
-      ev.stopPropagation();
-      this.toggleZoomMenu();
-    });
-    this.btn(bar, "+", () => this.zoom(1.15));
-    this.btn(bar, "⊡", () => this.fitAll());
-    // encuadra SOLO la tabla vigilada (con margen, dejando visible su entorno)
-    const fitW = bar.createEl("button", { text: "◎" });
-    fitW.title = t("navFitWatched");
-    this.registerDomEvent(fitW, "click", () => {
-      if (this.watchedTable) this.revealTable(this.watchedTable, true);
-    });
-
-    // dropdown de tablas (en lugar del navegador select): buscador + secciones
-    // "Enfocadas" y "Todas". Reemplaza al select de la barra y a la etiqueta
-    // de enfoque; siempre visible (en modo normal y en modo enfoque).
-    const ddBtn = bar.createEl("button", { text: "▾" });
-    ddBtn.title = t("searchTable");
-    this.dropdownBtn = ddBtn;
-    this.registerDomEvent(ddBtn, "click", (ev) => {
-      ev.stopPropagation();
-      this.toggleDropdown();
-    });
-    const panel = host.createDiv({ cls: "dbml-dd" });
-    panel.style.display = "none";
-    this.dropdownPanel = panel;
-
-    // apertura en ventana/overlay a pantalla completa (fuera del code block)
-    if (!opts?.window) {
-      const win = bar.createEl("button", { text: "⤢" });
-      win.title = t("windowOpen");
-      this.registerDomEvent(win, "click", () => void this.openWindow());
+    if (this.interactive) {
+      // toolbar (esquina inferior izquierda: la superior derecha corresponde al
+      // botón nativo "Edit this block" de Obsidian, que debe quedar accesible).
+      const bar = host.createDiv({ cls: "dbml-erd-toolbar" });
+      this.btn(bar, "−", () => this.zoom(0.87));
+      const zp = bar.createSpan({ cls: "dbml-zoom-pct", text: "100%" });
+      this.zoomPct = zp;
+      // clic en el porcentaje: menú desplegable con zooms estándar
+      zp.title = t("zoomPick");
+      this.registerDomEvent(zp, "click", (ev) => {
+        ev.stopPropagation();
+        this.toggleZoomMenu();
+      });
+      this.btn(bar, "+", () => this.zoom(1.15));
+      this.btn(bar, "⊡", () => this.fitAll());
+      // ⊞ alterna el modo enfoque (clic medio sobre el vacío también lo hace).
+      const fBtn = bar.createEl("button", { text: "⊞" });
+      fBtn.title = t("toggleFocus");
+      this.focusBtn = fBtn;
+      this.registerDomEvent(fBtn, "click", () => this.toggleFocusMode());
+      // "Quitar todas" y "Salir": visibles solo en modo enfoque.
+      const clearAllB = bar.createEl("button", { text: t("focusClearAll") });
+      clearAllB.title = t("focusClearAll");
+      clearAllB.dataset.wide = "1";
+      this.clearAllBtn = clearAllB;
+      this.registerDomEvent(clearAllB, "click", () => this.fitAll());
+      clearAllB.style.display = "none";
+      const exitB = bar.createEl("button", { text: t("exitFocus") });
+      exitB.title = t("exitFocus");
+      exitB.dataset.wide = "1";
+      this.exitBtn = exitB;
+      this.registerDomEvent(exitB, "click", () => this.exitFocus());
+      exitB.style.display = "none";
+      // dropdown de tablas (en lugar del navegador select): buscador + secciones
+      // "Enfocadas" y "Todas". Reemplaza al select de la barra y a la etiqueta
+      // de enfoque; siempre visible (en modo normal y en modo enfoque).
+      const ddBtn = bar.createEl("button", { text: "▾" });
+      ddBtn.title = t("searchTable");
+      this.dropdownBtn = ddBtn;
+      this.registerDomEvent(ddBtn, "click", (ev) => {
+        ev.stopPropagation();
+        this.toggleDropdown();
+      });
+      const panel = host.createDiv({ cls: "dbml-dd" });
+      panel.style.display = "none";
+      this.dropdownPanel = panel;
+      this.updateFocusUI();
+    } else {
+      // incrustado en la nota = ESTÁTICO (sin toolbar/pan/zoom/arrastre): un
+      // clic en cualquier punto abre la ventana a pantalla completa, donde vive
+      // toda la interacción. Evita la inestabilidad de editar desde el bloque.
+      host.classList.add("dbml-static");
+      host.createDiv({ cls: "dbml-static-hint", text: t("windowOpen") });
+      this.registerDomEvent(host, "pointerdown", (e: PointerEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void this.openWindow();
+      });
     }
-    this.updateFocusUI();
 
     this.drawNodes();
     this.redrawEdges();
-    this.bindPanZoom(host);
-    this.bindResize(host);
-    // el plugin abre sus propios menús (tabla/columna/arista): el contextmenu
-    // nativo de Obsidian (menú duplicado del code block) se descarta para no
-    // abrir un segundo overlay que saca del modo pantalla completa en Electron.
-    this.registerDomEvent(host, "contextmenu", (e: MouseEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-    });
     this.applyView();
     // si no hay vista guardada, encuadrar tras montar (necesita medidas del host)
     if (!opts?.view) activeWindow.requestAnimationFrame(() => this.fit());
-    // cierre del dropdown/menú de zoom al hacer clic fuera (captura: aunque el
-    // clic esté en el SVG/toolbar, se cierran antes de que esos handlers hagan
-    // otra cosa).
-    this.registerDomEvent(
-      activeDocument,
-      "pointerdown",
-      (e: PointerEvent) => {
-        const tgt = e.target as Element;
-        if (this.zoomMenu && this.zoomMenu.style.display === "block") {
-          if (!tgt.closest?.(".dbml-zoom-menu") && tgt !== this.zoomPct)
-            this.closeZoomMenu();
-        }
-        if (this.dropdownPanel?.style.display !== "block") return;
-        if (tgt.closest?.(".dbml-dd")) return;
-        if (tgt === this.dropdownBtn) return;
-        this.closeDropdown();
-      },
-      { capture: true }
-    );
-    // Esc: cierra el dropdown/panel de referencias o sale del modo enfoque
-    // (salvo que haya un menú/modal abierto, que gestiona su propia tecla
-    // Escape). En el overlay (opts.window) la tecla Escape la gestiona el Modal.
-    if (!opts?.window) {
+    if (this.interactive) {
+      this.bindPanZoom(host);
+      this.bindResize(host);
+      // el plugin abre sus propios menús (tabla/columna/arista): el contextmenu
+      // nativo de Obsidian (menú duplicado del code block) se descarta para no
+      // abrir un segundo overlay que saca del modo pantalla completa en Electron.
+      this.registerDomEvent(host, "contextmenu", (e: MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+      });
+      // cierre del dropdown/menú de zoom al hacer clic fuera (captura: aunque el
+      // clic esté en el SVG/toolbar, se cierran antes de que esos handlers hagan
+      // otra cosa).
+      this.registerDomEvent(
+        activeDocument,
+        "pointerdown",
+        (e: PointerEvent) => {
+          const tgt = e.target as Element;
+          if (this.zoomMenu && this.zoomMenu.style.display === "block") {
+            if (!tgt.closest?.(".dbml-zoom-menu") && tgt !== this.zoomPct)
+              this.closeZoomMenu();
+          }
+          if (this.dropdownPanel?.style.display !== "block") return;
+          if (tgt.closest?.(".dbml-dd")) return;
+          if (tgt === this.dropdownBtn) return;
+          this.closeDropdown();
+        },
+        { capture: true }
+      );
+      // Esc: cierra el dropdown/panel de referencias o sale del modo enfoque
+      // (la ventana gestiona su propia tecla Escape a través del Modal).
       this.registerDomEvent(activeWindow, "keydown", (e: KeyboardEvent) => {
         if (e.key !== "Escape") return;
         if (this.zoomMenu && this.zoomMenu.style.display === "block") {
@@ -475,6 +514,7 @@ class Diagram extends MarkdownRenderChild {
 
   onunload() {
     if (this.saveTimer) activeWindow.clearTimeout(this.saveTimer);
+    if (this.focusSaveTimer) activeWindow.clearTimeout(this.focusSaveTimer);
     this.closeRefPanel();
   }
 
@@ -504,6 +544,8 @@ class Diagram extends MarkdownRenderChild {
     new ErdWindowModal(this.plugin.app, this.plugin, src, {
       file,
       lineStart: info.lineStart,
+      ctx: this.ctx,
+      blockEl: this.blockEl,
     }).open();
   }
 
@@ -904,7 +946,7 @@ class Diagram extends MarkdownRenderChild {
     tt.textContent = `${r.from}.${r.fromCol} → ${r.to}.${r.toCol}`;
     hit.appendChild(tt);
     this.edgeLayer.appendChild(hit);
-    this.enableEdgeSelect(hit, r);
+    if (this.interactive) this.enableEdgeSelect(hit, r);
     const s = pts[0];
     const e = pts[pts.length - 1];
     const fromMany = r.op === ">" || r.op === "<>";
@@ -967,7 +1009,7 @@ class Diagram extends MarkdownRenderChild {
         } else if (e.button === 2) {
           // clic derecho: vigilar la tabla que no está vigilada
           const other = this.watchedTable === r.from ? r.to : r.from;
-          this.revealTable(other, true);
+          this.revealTable(other);
           this.watchEdge(this.edgeKey(r));
         }
       };
@@ -1222,6 +1264,11 @@ class Diagram extends MarkdownRenderChild {
     // el dropdown refleja el estado de enfoque actual (si está abierto)
     if (this.dropdownPanel && this.dropdownPanel.style.display === "block")
       this.refreshDropdown(this.ddSearchValue());
+    // botones del toolbar: "Quitar todas"/"Salir" solo mientras ha modo enfoque
+    const active = this.exploring;
+    this.focusBtn?.classList.toggle("on", active);
+    if (this.clearAllBtn) this.clearAllBtn.style.display = active ? "" : "none";
+    if (this.exitBtn) this.exitBtn.style.display = active ? "" : "none";
   }
 
   private ddSearchValue(): string {
@@ -1379,7 +1426,7 @@ class Diagram extends MarkdownRenderChild {
     // click en la fila: vigilar la tabla (centrar + mostrar todo)
     row.addEventListener("click", (e) => {
       e.stopPropagation();
-      this.revealTable(tbl.name, true);
+      this.revealTable(tbl.name);
       this.markDdWatched(tbl.name);
     });
     // botón medio: alternar el enfoque de la tabla
@@ -1437,19 +1484,21 @@ class Diagram extends MarkdownRenderChild {
     const cur = this.watchedTable ?? names[0];
     let idx = names.indexOf(cur);
     if (idx < 0) idx = 0;
-    this.revealTable(names[(idx + dir + names.length) % names.length], true);
+    this.revealTable(names[(idx + dir + names.length) % names.length]);
   }
 
   private applyFocusView() {
     this.closeRefPanel();
-    // re-dispersa las tablas enfocadas en una fila compacta (ignora la
-    // posición/orientación original; esta disposición se descarta al salir).
+    // provisional: fila compacta mientras ELK calcula el jerárquico L→R del
+    // subconjunto enfocado (esta disposición se descarta al salir).
     this.layoutPos = this.layoutCompact(this.focus ?? new Set<string>());
     this.redrawNodes();
     this.redrawEdges();
     this.redrawHandles();
     this.updateFocusUI();
     this.fit(true);
+    // sistema de layout propio del modo enfoque: jerárquico (L→R) al añadir/quitar
+    void this.reflowFocus();
   }
 
   // añade la tabla al modo enfoque SIN reemplazar el conjunto existente (multi
@@ -1469,7 +1518,8 @@ class Diagram extends MarkdownRenderChild {
   }
 
   // persiste el estado de enfoque en el plugin para que sobreviva a re-renders
-  // (guardar layout con vault.process re-renderiza el bloque).
+  // (guardar layout con vault.process re-renderiza el bloque) y en el archivo
+  // como anotación `// @focusOn` (el "fondo" de la nota: sobrevive a recargas).
   private saveFocusState() {
     if (!this.plugin || !this.selKey) return;
     if (this.focus && this.focus.size) {
@@ -1477,6 +1527,61 @@ class Diagram extends MarkdownRenderChild {
     } else {
       this.plugin.focusState.delete(this.selKey);
     }
+    this.scheduleSaveFocus();
+  }
+
+  private focusSaveTimer = 0;
+  // escribe la anotación @focusOn con el conjunto actual (o la borra al salir).
+  // No pasa por saveLayout: esa ruta se pausa durante el enfoque.
+  private scheduleSaveFocus() {
+    if (this.focusSaveTimer) activeWindow.clearTimeout(this.focusSaveTimer);
+    this.focusSaveTimer = activeWindow.setTimeout(
+      () => void this.saveFocusAnnot(),
+      400
+    );
+  }
+
+  private async saveFocusAnnot() {
+    if (!this.plugin || !this.ctx || !this.blockEl) return;
+    const info = this.ctx.getSectionInfo(this.blockEl);
+    if (!info) return;
+    const file = this.plugin.app.vault.getAbstractFileByPath(
+      this.ctx.sourcePath
+    );
+    if (!(file instanceof TFile)) return;
+    const data = await this.plugin.app.vault.read(file);
+    const next = this.buildFocusContent(data, info.lineStart);
+    if (next === null || next === data) return;
+    await this.plugin.app.vault.process(
+      file,
+      (d) => this.buildFocusContent(d, info.lineStart) ?? d
+    );
+  }
+
+  // reconstruye el bloque sustituyendo la anotación @focusOn (la elimina si el
+  // modo enfoque está inactivo). Devuelve null si no se encuentra el bloque.
+  private buildFocusContent(data: string, lineStart: number): string | null {
+    const lines = data.split("\n");
+    const range = this.blockRange(lines, lineStart);
+    if (!range) return null;
+    const [open, close] = range;
+    const names = this.focus ? [...this.focus] : [];
+    const body = lines
+      .slice(open + 1, close)
+      .filter((l) => !/^\s*\/\/\s*@focusOn\b/.test(l));
+    const insert = names.length ? [focusOnLine(names)] : [];
+    return [
+      ...lines.slice(0, open + 1),
+      ...body,
+      ...insert,
+      ...lines.slice(close),
+    ].join("\n");
+  }
+
+  // estado de enfoque actual (copia), para la anotación @focusOn al guardar la
+  // ventana (writeBack) desde el Diagram montado dentro del Modal.
+  getFocusedTables(): string[] {
+    return this.focus ? [...this.focus] : [];
   }
 
   // ⊡ del toolbar o menú "Show all": vuelve al diagrama completo.
@@ -1503,25 +1608,83 @@ class Diagram extends MarkdownRenderChild {
     this.fitAll();
   }
 
-  // Concentra la vista en una tabla concreta SIN ocultar el resto (a diferencia
-  // del modo enfoque). Marca ".dbml-node-live" y actualiza el navegador.
-  revealTable(name: string, fit = true) {
+  // Vigila una tabla concreta SIN mover la vista: traer/ver una clase en el GUI
+// no debe hacer saltar el pan/zoom (sin "zoom jumping"). Marca ".dbml-node-live"
+// y actualiza el navegador. En modo enfoque NO se sale: la tabla se añade al
+// conjunto (si no estaba) y se vigila igualmente, recalculando el layout
+// jerárquico L→R del conjunto actualizado.
+  revealTable(name: string) {
     if (!this.pos[name]) return;
     this.watchedTable = name;
     this.watchedEdgeKey = null;
     this.markLiveRow(null, null);
-    if (this.focus) {
-      // en modo enfoque no aplica: se sale a la vista completa y se concentra.
-      this.focus = null;
-      this.layoutPos = null;
+    if (this.focus && !this.focus.has(name)) {
+      this.focus.add(name);
+      this.layoutPos = this.layoutCompact(this.focus);
       this.saveFocusState();
-      this.closeRefPanel();
+      void this.reflowFocus();
     }
     this.redrawNodes();
     this.redrawEdges();
     this.redrawHandles();
     this.updateFocusUI();
-    if (fit) this.fitToTable(name);
+  }
+
+  private focusLayoutToken = 0;
+  // Sistema de layout PROPIO del modo enfoque: jerárquico (L→R), recalculado
+  // con ELK sobre el subconjunto enfocado CADA vez que se añade o quita una
+  // tabla (frente a la fila compacta provisional). No cambia pan/zoom.
+  private async reflowFocus() {
+    const set = this.focus;
+    if (!set || !set.size) return;
+    const tables = this.model.tables.filter((x) => set.has(x.name));
+    if (!tables.length) return;
+    const refs = this.model.refs.filter(
+      (r) => set.has(r.from) && set.has(r.to)
+    );
+    const tok = ++this.focusLayoutToken;
+    let lay: LayoutResult;
+    try {
+      lay = await computeLayout({ tables, refs }, "layered-lr");
+    } catch {
+      return;
+    }
+    if (tok !== this.focusLayoutToken || !this.focus || this.focus !== set)
+      return;
+    // normaliza el origen del layout del subconjunto al (0,0) del lienzo
+    let minX = 1e9,
+      minY = 1e9;
+    for (const n of Object.values(lay.nodes)) {
+      minX = Math.min(minX, n.x);
+      minY = Math.min(minY, n.y);
+    }
+    const off = 30;
+    const map: Record<
+      string,
+      { x: number; y: number; w: number; h: number }
+    > = {};
+    for (const [k, n] of Object.entries(lay.nodes)) {
+      map[k] = { x: n.x - minX + off, y: n.y - minY + off, w: n.w, h: n.h };
+    }
+    this.layoutPos = map;
+    this.redrawNodes();
+    this.redrawEdges();
+    this.redrawHandles();
+  }
+
+  // ⊞ del toolbar / clic medio sobre el vacío: alterna el modo enfoque.
+  // Entrar: enfoca la tabla vigilada (o la primera si no hay ninguna).
+  // Salir: vuelve al diagrama completo.
+  private toggleFocusMode() {
+    if (this.exploring) {
+      this.exitFocus();
+      return;
+    }
+    const first = this.watchedTable ?? this.model.tables[0]?.name;
+    if (!first) return;
+    this.focus = new Set([first]);
+    this.saveFocusState();
+    this.applyFocusView();
   }
 
   // el candado del layout impide arrastrar las tablas (editores externos)
@@ -1534,34 +1697,6 @@ class Diagram extends MarkdownRenderChild {
   watchEdge(key: string) {
     this.watchedEdgeKey = key;
     this.redrawEdges();
-  }
-
-  // vista centrada en la tabla vigilada SIN contexto alrededor: la clase se
-  // coloca en el centro exacto del lienzo con zoom 100%; si la tabla no cabe
-  // a ese zoom, se baja al mínimo que permite encajarla completa.
-  private fitToTable(name: string, retried = false) {
-    const P = this.pos[name];
-    const r = this.svg.getBoundingClientRect();
-    if (!P) return;
-    if (r.width === 0 || r.height === 0) {
-      // recién montado, el lienzo aún no tiene tamaño: reintenta el encuadre en
-      // el siguiente frame (si no, el reveal en vivo se pierde tras el render).
-      if (!retried && this.svg.isConnected) {
-        requestAnimationFrame(() => this.fitToTable(name, true));
-      }
-      return;
-    }
-    const t = this.model.tables.find((x) => x.name === name);
-    const w = P.w || NODE_W;
-    const h = P.h || HEAD_H + (t ? t.cols.length * ROW_H : 0);
-    // 100% si cabe; si no, el zoom mínimo para que la clase entre entera.
-    const k = isFinite(Math.min(1, r.width / w, r.height / h))
-      ? Math.min(1, r.width / w, r.height / h)
-      : 1;
-    this.view.k = k > 0 ? k : 0.25;
-    this.view.x = r.width / 2 - (P.x + w / 2) * this.view.k;
-    this.view.y = r.height / 2 - (P.y + h / 2) * this.view.k;
-    this.applyView();
   }
 
   // recorta el nombre de la cabecera para que no invada los contadores.
@@ -1641,6 +1776,9 @@ class Diagram extends MarkdownRenderChild {
     refs.forEach((r) => {
       const target = dir === "out" ? r.to : r.from;
       const row = panel.createDiv({ cls: "dbml-refpanel-row" });
+      // la clase ya enfocada se remarca: así se ve de un vistazo qué destinos
+      // del badge pertenecen ya al modo enfoque.
+      if (this.focus?.has(target)) row.classList.add("focused");
       row.setAttribute("data-table", target);
       row.createSpan({
         cls: "dbml-refpanel-arrow",
@@ -1656,7 +1794,7 @@ class Diagram extends MarkdownRenderChild {
       row.title = t("refHint");
       row.addEventListener("click", (e) => {
         e.stopPropagation();
-        this.revealTable(target, true);
+        this.revealTable(target);
         this.watchEdge(this.edgeKey(r));
       });
       row.addEventListener("auxclick", (e) => {
@@ -1783,28 +1921,8 @@ class Diagram extends MarkdownRenderChild {
         const nm = this.text(14, y, c.name, c.pk ? "dbml-col pk" : "dbml-col");
         nm.setAttribute("data-col", String(i));
         cg.appendChild(nm);
-        // PK: el nombre en negrita + subrayado (sin emoji). FK: icono pequeño de
-        // eslabón/enlace — la referencia también la transmiten los badges.
-        if (c.fk) {
-          const lg = activeDocument.createElementNS(NS, "g");
-          lg.classList.add("dbml-icon-link");
-          lg.setAttribute("data-col", String(i));
-          const lx = 14 + c.name.length * 7 + 8;
-          const cy = y - 8;
-          for (const [dx, rot] of [
-            [-2, -18],
-            [2, 18],
-          ] as const) {
-            const el = activeDocument.createElementNS(NS, "ellipse");
-            el.setAttribute("cx", String(lx + dx));
-            el.setAttribute("cy", String(cy));
-            el.setAttribute("rx", "2.6");
-            el.setAttribute("ry", "5");
-            el.setAttribute("transform", `rotate(${rot} ${lx + dx} ${cy})`);
-            lg.appendChild(el);
-          }
-          cg.appendChild(lg);
-        }
+        // PK: el nombre en negrita + subrayado. Sin iconos ni emojis en las
+        // propiedades: una FK se transmite solo con los badges de referencia.
         // badges de referencia por columna (misma lógica que la cabecera pero
         // específica de esta propiedad): se apilan a la derecha, antes del tipo.
         const colOut = this.model.refs.filter(
@@ -1856,7 +1974,7 @@ class Diagram extends MarkdownRenderChild {
         cg.appendChild(ty);
       });
 
-      this.enableDrag(g, t.name);
+      if (this.interactive) this.enableDrag(g, t.name);
       this.nodeLayer.appendChild(g);
     });
   }
@@ -2020,7 +2138,7 @@ class Diagram extends MarkdownRenderChild {
       this.focusPair(name, other);
     } else {
       // clic izdo/dcho: vigilar la tabla referenciada
-      this.revealTable(other, true);
+      this.revealTable(other);
       this.watchEdge(this.edgeKey(refs[0]));
     }
   }
@@ -2124,7 +2242,7 @@ class Diagram extends MarkdownRenderChild {
                   ?.name ?? null
               : null;
           if (this.onJump) this.onJump(name, col, targetPart);
-          else this.revealTable(name, true);
+          else this.revealTable(name);
         } else if (e.button === 1) {
           // clic medio: alternar enfoque
           this.toggleFocusTable(name);
@@ -2154,7 +2272,7 @@ class Diagram extends MarkdownRenderChild {
             ? "type"
             : "name";
       if (this.onJump) this.onJump(name, col, part);
-      else this.revealTable(name, true);
+      else this.revealTable(name);
     });
   }
 
@@ -2343,6 +2461,14 @@ class Diagram extends MarkdownRenderChild {
       // el panel de referencias y el toolbar no inician panning ni salen de foco
       if (tgt.closest(".dbml-refpanel") || tgt.closest(".dbml-erd-toolbar"))
         return;
+      // botón medio sobre el vacío: alterna el modo enfoque (las tablas/badges/
+      // aristas detienen su propio pointerdown y gestionan su clic medio).
+      if (e.button === 1) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.toggleFocusMode();
+        return;
+      }
       // clic en vacío: solo pan. NO sale del modo enfoque (hay que salir con
       // Esc o retirando las tablas del enfoque).
       panned = false;
@@ -2506,16 +2632,29 @@ class ErdWindowModal extends Modal {
   // al cambiar de layout se re-encuadra el diagrama completo tras el render.
   private refitNext = false;
 
+  // vista del código fuente y elemento del bloque HTML de origen: se pasan al
+  // Diagram de la ventana para que los arrastres persistan el layout @pos/@view
+  // en la nota real (misma vía que usa el diagrama incrustado).
+  private ctx: MarkdownPostProcessorContext | undefined;
+  private blockEl: HTMLElement | undefined;
+
   constructor(
     app: App,
     plugin: DbmlErdPlugin,
     source: string,
-    ref: { file: TFile; lineStart: number }
+    ref: {
+      file: TFile;
+      lineStart: number;
+      ctx?: MarkdownPostProcessorContext;
+      blockEl?: HTMLElement;
+    }
   ) {
     super(app);
     this.plugin = plugin;
     this.file = ref.file;
     this.lineStart = ref.lineStart;
+    this.ctx = ref.ctx;
+    this.blockEl = ref.blockEl;
     this.layoutKind =
       parseLayout(source) ??
       this.plugin.settings.layout ??
@@ -2790,7 +2929,7 @@ class ErdWindowModal extends Modal {
     // revela la tabla buscada en el diagrama (revealTable sale del enfoque)
     this.lastReveal = table;
     const d = this.diagram;
-    if (d && d.hasTable(table)) d.revealTable(table, true);
+    if (d && d.hasTable(table)) d.revealTable(table);
     this.updateLiveReveal(); // también subraya la columna saltada
     // desplazar la línea objetivo a ~1/3 de la altura visible
     const lh = parseFloat(getComputedStyle(ed).lineHeight) || 18;
@@ -2816,7 +2955,7 @@ class ErdWindowModal extends Modal {
     if (table && table !== this.lastReveal) {
       this.lastReveal = table;
       // revealTable ya sale del modo enfoque si hace falta
-      if (d && d.hasTable(table)) d.revealTable(table, true);
+      if (d && d.hasTable(table)) d.revealTable(table);
     }
     // subraya la columna exacta del cursor en la tabla vigilada
     if (d && table && d.hasTable(table)) {
@@ -2966,12 +3105,15 @@ private tableAtCaret(): CaretHit | null {
         {
           plugin: this.plugin,
           window: true,
+          ctx: this.ctx,
+          el: this.blockEl,
           savedPos: parsePositions(src),
           view: view ?? parseView(src) ?? undefined,
           size: parseSize(src) ?? undefined,
           savedEdges: parseEdges(src),
           layout: this.layoutKind,
           layoutLocked: this.layoutLocked,
+          focus: parseFocusOn(src) ?? undefined,
           onJump: (table, col, part) => this.jumpTo(table, col, part),
         }
       );
@@ -2983,7 +3125,7 @@ private tableAtCaret(): CaretHit | null {
         !this.diagram.exploring &&
         this.diagram.hasTable(this.lastReveal)
       ) {
-        this.diagram.revealTable(this.lastReveal, true);
+        this.diagram.revealTable(this.lastReveal);
       }
       if (this.refitNext) {
         this.refitNext = false;
@@ -3001,7 +3143,7 @@ private tableAtCaret(): CaretHit | null {
   // escribe el código editado de vuelta en el bloque, conservando las
   // anotaciones del plugin (@pos/@view/@size/@edge/@layout) del archivo.
   private isAnnotLine(l: string) {
-    return /^\s*\/\/\s*@(pos|view|size|edge|layout|layoutLocked)\b/.test(l);
+    return /^\s*\/\/\s*@(pos|view|size|edge|layout|layoutLocked|focusOn)\b/.test(l);
   }
   private escRe(s: string) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -3112,6 +3254,21 @@ private tableAtCaret(): CaretHit | null {
       return l;
     });
     if (!lockWritten) annots.unshift(layoutLockLine(this.layoutLocked));
+    // la línea `@focusOn` refleja el foco del diagrama montado (o se retira).
+    let focusWritten = false;
+    annots = annots.map((l) => {
+      if (/^\s*\/\/\s*@focusOn\b/.test(l)) {
+        focusWritten = true;
+        const names = this.diagram ? this.diagram.getFocusedTables() : [];
+        return names.length ? focusOnLine(names) : "";
+      }
+      return l;
+    });
+    annots = annots.filter((l) => l !== "");
+    if (!focusWritten) {
+      const names = this.diagram ? this.diagram.getFocusedTables() : [];
+      if (names.length) annots.unshift(focusOnLine(names));
+    }
     let body = this.editor.value.replace(/\n+$/, "").split("\n");
     if (rename) {
       // también se renombra la anotación @pos (@pos Old …) para conservar la

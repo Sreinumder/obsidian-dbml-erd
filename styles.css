@@ -24,6 +24,28 @@
   cursor: grabbing;
 }
 
+/* incrustado en la nota: diagrama ESTÁTICO (toda la interacción vive en la
+   ventana; un clic en cualquier punto la abre). */
+.dbml-erd-canvas.dbml-static,
+.dbml-erd-canvas.dbml-static .dbml-erd-svg,
+.dbml-erd-canvas.dbml-static .dbml-node {
+  cursor: pointer;
+}
+.dbml-static-hint {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 3;
+  font-size: 11px;
+  color: var(--text-faint);
+  background: var(--background-primary);
+  background: color-mix(in srgb, var(--background-primary) 82%, transparent);
+  border-radius: 4px;
+  padding: 2px 6px;
+  pointer-events: none;
+  opacity: 0.85;
+}
+
 .dbml-erd-svg {
   position: absolute;
   inset: 0;
@@ -83,12 +105,6 @@
 }
 .dbml-icon {
   font-size: 11px;
-}
-/* icono de eslabón/enlace para propiedades referenciadas (FK) */
-.dbml-icon-link {
-  stroke: var(--text-muted);
-  fill: none;
-  stroke-width: 1.4;
 }
 .dbml-badge {
   fill: var(--background-modifier-border);
@@ -177,6 +193,16 @@
 }
 .dbml-erd-toolbar button:hover {
   border-color: var(--interactive-accent);
+}
+.dbml-erd-toolbar button[data-wide] {
+  width: auto;
+  padding: 0 8px;
+  font-size: 13px;
+}
+.dbml-erd-toolbar button.on {
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+  color: var(--text-on-accent);
 }
 .dbml-erd-toolbar button.focus-exit {
   background: var(--interactive-accent);
@@ -444,6 +470,15 @@
 }
 .dbml-refpanel-row:hover {
   background: var(--background-modifier-hover);
+}
+/* fila cuyo destino ya pertenece al modo enfoque: se remarca */
+.dbml-refpanel-row.focused {
+  background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+  outline: 1px solid var(--text-accent);
+  outline-offset: -1px;
+}
+.dbml-refpanel-row.focused .dbml-refpanel-target {
+  color: var(--text-accent);
 }
 .dbml-refpanel-arrow {
   font-weight: 700;

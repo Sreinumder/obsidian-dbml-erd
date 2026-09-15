@@ -2,7 +2,8 @@
 
 This is the `obsidian-dbml-erd` plugin (https://github.com/wrojasa/obsidian-dbml-erd),
 cloned from tag `0.1.21` (commit `d292a41`), with a local patch applied in
-`src/main.ts`, `src/i18n.ts` and `styles.css`, plus a freshly built `main.js`.
+`src/main.ts`, `src/parser.ts`, `src/layout.ts`, `src/i18n.ts` and `styles.css`,
+plus a freshly built `main.js`.
 
 This folder was cloned to `~/projects/obsidian/dbml-erd` so development can
 continue on a proper git history. All new work happens on branch
@@ -315,9 +316,9 @@ single consistent scheme and adds a redesigned table navigator.
   after a re-render.
 - **Polish.** The native modal `✕` (top-right) is removed — the "Close" button
   already exits. SVG text is `user-select: none`, so left-click dragging in the
-  GUI never highlights text. Primary-key properties no longer show the 🔑 emoji:
-  the property name is just bold + underlined. Foreign-key properties replace
-  the 🔗 emoji with a small stroke-drawn chain-link icon (`dbml-icon-link`).
+  GUI never highlights text. Primary-key properties are just **bold + underlined**
+  and foreign-key properties carry **no icon or emoji at all** — a reference is
+  conveyed only by the in/out badges (and the arrow tooltips).
 - **Last arrow used is highlighted.** Whenever you travel/watch via an edge
   (right-click an arrow, a reference badge, or a row of the reference list) the
   arrow you followed gets a `dbml-edge.live` accent until the next watch
@@ -351,6 +352,53 @@ single consistent scheme and adds a redesigned table navigator.
 - **New i18n keys:** `lockLayout`, `unlockLayout`, `searchTable`, `noResults`,
   `focusedTables`, `allTables`, `addToFocus`, `removeFromFocus`, `zoomPick`,
   `crumbIdle`; removed `radial`, `organic` (en + es).
+- **Focus mode is now "sticky" fast-travel.** Watching NO LONGER quits focus
+  mode: any "watch" trigger (right-click on a class, an arrow, a reference badge,
+  a row of the reference list) while in focus mode ADDS the referenced class to
+  the focus set (if not there) and watches it, then zooms to it — the mode stays.
+  Middle-click on empty canvas space toggles focus mode on/off; the toolbar
+  `◎ fit-watched` button is replaced by a `⊞` focus-mode toggle (highlighted while
+  active), plus two buttons visible ONLY in focus mode: "Clear all" (drop every
+  focused table) and "Exit focus" (back to the full diagram).
+- **Focus survives reload = saved on the background.** The focus set is written
+  to the note as a `// @focusOn TablaA,TablaB` annotation line inside the block
+  (new parser `parseFocusOn`/`focusOnLine`; the window save-back and the inline
+  layout saver both rewrite/remove it), so the focused state is restored across
+  Obsidian restarts — not only across re-renders. The annotation is dropped when
+  focus is cleared.
+
+### 10. Static inline diagram + hierarchical focus layout (branch `feat/focus-and-ref-ui`)
+
+- **The in-note diagram is now fully STATIC.** Editing dragging around the
+  embedded block proved unstable, so everything interactive moved exclusively
+  into the full-screen window. The embedded diagram has **no toolbar, no
+  pan/zoom/panning, no drag, no dropdown, no context menu, no Escape handler**:
+  a `pointerdown` anywhere on it opens the full-screen window
+  (`openWindow`). A subtle `.dbml-static-hint` badge in the corner says so. The
+  `interactive` flag (`opts.window`) gates every surface: toolbar creation,
+  `bindPanZoom`/`bindResize`, node drag (`enableDrag`), edge handlers
+  (`enableEdgeSelect`), the outside-click menu closers and Escape. The `⤢`
+  window button is no longer needed — the whole block opens the window.
+- **Watch never moves the view (no "zoom jumping").** `revealTable` no longer
+  takes a `fit` argument and never re-centers/zooms: bringing or watching a new
+  class while browsing keeps the current pan/zoom untouched. `fitToTable` (and
+  its rAF retry) is deleted; all 10 call sites updated.
+- **Focus has its own hierarchical layout, applied on every add/remove.**
+  Besides the provisional compact row (`layoutCompact`), entering focus mode or
+  adding/removing a focused table recomputes a **layered L→R** layout with ELK
+  over *only the focused subset* (`reflowFocus`, async with a generation token
+  `focusLayoutToken` so stale results are dropped), normalized to the canvas
+  origin. Redraws in place without touching pan/zoom.
+- **Ref-panel rows highlight already-focused targets.** Opening an in/out badge
+  while in focus mode marks the rows whose destination table is already in the
+  focus set with `.dbml-refpanel-row.focused` (accent outline + name colour).
+- **Window diagram persists drags to the note again.** `openWindow` now passes
+  the source `ctx`/`blockEl` through `ErdWindowModal` to the window `Diagram`
+  (`opts.ctx`/`opts.el`), so moving tables in the unlocked window writes
+  `@pos`/`@view` back into the real note (same path as the old embedded block).
+- **New i18n reuse / CSS:** the static hint reuses `windowOpen`; CSS adds
+  `.dbml-static` (pointer cursor over the whole canvas), `.dbml-static-hint` and
+  `.dbml-refpanel-row.focused`.
 
 ## Files changed vs upstream
 
@@ -360,14 +408,16 @@ single consistent scheme and adds a redesigned table navigator.
 | `src/parser.ts` | **`LayoutKind`/`LAYOUT_KINDS`/`parseLayout`/`layoutLine` for the `// @layout` annotation** |
 | `src/layout.ts` | **`computeLayout(model, kind)`, `LayoutResult.routes`, custom `radialNodes` (circular ring) + `stressNodes` (organic), layered direction from kind** |
 | `src/i18n.ts` | new keys: `refOutBadge`, `refInBadge`, `refHeadingOut/In`, `refHint`, `refNoRefs`, `focusOn`, `showAll`, `exitFocus`, `windowOpen`, `windowTitle`, `windowCode`, `windowSave`, `windowSaved`, `windowSaveError`, `windowCopy`, `windowCopied`, `windowCopyError`, `windowExit` (en + es); **+ `layout`, `layered-lr`, `layered-tb`, `radial`, `organic`, `settingsLayout`, `settingsLayoutDesc`, `navPrev`, `navNext`, `navFitWatched`, `renameTitle`, `renameBody`, `renameApply` (en + es)** |
-| `styles.css` | toolbar → bottom-left; `.focus-exit` button; `.dbml-focus-label`; `.dbml-node-focus` outline; `.dbml-ref-badge*` pills; `.dbml-refpanel*` list; `.erd-window*` overlay, editor textarea (flex column so the breadcrumb bar is visible), resizable split, hidden split; removed `:fullscreen` rules; **`.dbml-node-live`, `.dbml-row-live`, `.dbml-zoom-pct`, `.dbml-nav-prev` (select + buttons), `.dbml-edge.live`, `.erd-window-crumb`, `.dbml-col.pk` underline, `.dbml-icon-link`, modal `✕` hidden, SVG `user-select: none`** |
+| `styles.css` | toolbar → bottom-left; `.focus-exit` button; `.dbml-focus-label`; `.dbml-node-focus` outline; `.dbml-ref-badge*` pills; `.dbml-refpanel*` list; `.erd-window*` overlay, editor textarea (flex column so the breadcrumb bar is visible), resizable split, hidden split; removed `:fullscreen` rules; **`.dbml-node-live`, `.dbml-row-live`, `.dbml-zoom-pct`, `.dbml-nav-prev` (select + buttons), `.dbml-edge.live`, `.erd-window-crumb`, `.dbml-col.pk` underline, modal `✕` hidden, SVG `user-select: none`** |
 | `main.js` | rebuilt via `npm run build` after the source edits |
-| **`src/main.ts` (v9)** | unified pointer scheme (left=move/pan, right=watch, middle=focus); **dropdown (▾)** with search/`✕`/`+` (`openDropdown`/`refreshDropdown`/`addDdRow`/`toggleFocusTable`), replaces `◀/▶` + select + focus label; **multi-table focus set** (`focusPair` additive, `toggleFocusTable`); background click no longer exits focus mode (Escape/`✕` only); **per-column ref badges** in the column rows; **single-ref badge direct action + ref-panel fallback** (`handleBadgeClick`, `openRefPanel` with column filter, `elemCol`/`elemBadge`/`badgeRefs`/`badgeTables`/`badgeLabel`); `drawEdge` arrow tooltip (`title`) + click pan/right-watch/middle-focus both; **double-click → jump to editor** (`onJump`); **layout lock default ON** (`// @layoutLocked false` persists unlock; `setLayoutLocked`, lock button in `ErdWindowModal`, annotation regexes include it, `renderBlock` passes it); **locked layout pans from tables** (`letPan` in `enableDrag`, `dbml-locked` canvas class + grab cursor); **drag grab-point fix** (`sx/sy` in `enableDrag`); **right-click watch + caret jump**; **toolbar `− 100% +` + clickable zoom preset menu** (`toggleZoomMenu`/`setZoomPct`/`.dbml-zoom-menu`); **editor breadcrumb** (`updateCrumb`/`.erd-window-crumb` + `selectionchange` on doc & textarea); **last-arrow highlight** (`watchEdge`/`watchedEdgeKey`, `dbml-edge.live`); **3-pattern jump selection** (`parsePropLine`/`locPropLine` + `.dbml-type` click target): class name word / property name only / property type span, setting-aware `Table` line, block-scoped col search; **fitToTable = 100% centred, min-fit fallback** (no margins); **reverse-pattern breadcrumb** (`tableAtCaret` line parse: class / prop / prop·type, `CaretHit`); **FK chain-link icon, PK bold+underline, removed native modal `✕`**; `fitToTable` rAF retry for live reveal; removed edge-editing methods (no-ops left) |
-| **`src/parser.ts` (v9)** | `LAYOUT_KINDS` → only `layered-lr`/`layered-tb`; **`parseLayoutLocked`/`layoutLockLine` (absence = locked; explicit `false` value)** |
+| **`src/main.ts` (v9)** | unified pointer scheme (left=move/pan, right=watch, middle=focus); **dropdown (▾)** with search/`✕`/`+` (`openDropdown`/`refreshDropdown`/`addDdRow`/`toggleFocusTable`), replaces `◀/▶` + select + focus label; **multi-table focus set** (`focusPair` additive, `toggleFocusTable`); background click no longer exits focus mode (Escape/`✕` only); **per-column ref badges** in the column rows; **single-ref badge direct action + ref-panel fallback** (`handleBadgeClick`, `openRefPanel` with column filter, `elemCol`/`elemBadge`/`badgeRefs`/`badgeTables`/`badgeLabel`); `drawEdge` arrow tooltip (`title`) + click pan/right-watch/middle-focus both; **double-click → jump to editor** (`onJump`); **layout lock default ON** (`// @layoutLocked false` persists unlock; `setLayoutLocked`, lock button in `ErdWindowModal`, annotation regexes include it, `renderBlock` passes it); **locked layout pans from tables** (`letPan` in `enableDrag`, `dbml-locked` canvas class + grab cursor); **drag grab-point fix** (`sx/sy` in `enableDrag`); **right-click watch + caret jump**; **toolbar `− 100% +` + clickable zoom preset menu** (`toggleZoomMenu`/`setZoomPct`/`.dbml-zoom-menu`); **editor breadcrumb** (`updateCrumb`/`.erd-window-crumb` + `selectionchange` on doc & textarea); **last-arrow highlight** (`watchEdge`/`watchedEdgeKey`, `dbml-edge.live`); **3-pattern jump selection** (`parsePropLine`/`locPropLine` + `.dbml-type` click target): class name word / property name only / property type span, setting-aware `Table` line, block-scoped col search; **fitToTable = 100% centred, min-fit fallback** (no margins); **reverse-pattern breadcrumb** (`tableAtCaret` line parse: class / prop / prop·type, `CaretHit`); **PK bold+underline, no FK icon/emoji at all, removed native modal `✕`**; `fitToTable` rAF retry for live reveal; removed edge-editing methods (no-ops left); **focus = sticky**: watch adds to focus & stays in mode (`revealTable` no longer exits), middle-click on empty space toggles mode (`toggleFocusMode`), toolbar `⊞` toggle replaces `◎`, "Clear all"/"Exit focus" buttons shown only in focus, `// @focusOn` annotation persisted to the note (`saveFocusState`→`scheduleSaveFocus`→`saveFocusAnnot`/`buildFocusContent`, `getFocusedTables`) |
+| **`src/parser.ts` (v9)** | `LAYOUT_KINDS` → only `layered-lr`/`layered-tb`; **`parseLayoutLocked`/`layoutLockLine` (absence = locked; explicit `false` value); `parseFocusOn`/`focusOnLine` (`// @focusOn`) for persisted focus** |
 | **`src/layout.ts` (v9)** | removed `radialNodes`/`stressNodes` (only layered ELK path remains) |
-| **`src/i18n.ts` (v9)** | **+ `lockLayout`, `unlockLayout`, `searchTable`, `noResults`, `focusedTables`, `allTables`, `addToFocus`, `removeFromFocus`, `zoomPick`; − `radial`, `organic`** (en + es) |
-| **`styles.css` (v9)** | **`.dbml-dd*` dropdown (sticky search, rows, sections, empty); `.dbml-zoom-pct` button + `.dbml-zoom-menu*`; `.erd-window-lock`** |
+| **`src/i18n.ts` (v9)** | **+ `lockLayout`, `unlockLayout`, `searchTable`, `noResults`, `focusedTables`, `allTables`, `addToFocus`, `removeFromFocus`, `zoomPick`, `toggleFocus`, `focusClearAll`** (en + es) |
+| **`styles.css` (v9)** | **`.dbml-dd*` dropdown (sticky search, rows, sections, empty); `.dbml-zoom-pct` button + `.dbml-zoom-menu*`; `.erd-window-lock`; toolbar `button.on` active focus-toggle + `[data-wide]` text buttons** |
 | **`main.js` (v9)** | rebuilt via `npm run build` after the source edits |
+| **`src/main.ts` (v10)** | **`Diagram.interactive` (static in-note vs window); toolbar/menus/pan-zoom/drag/edge-select/Escape gated by it; static host = `.dbml-static` + `.dbml-static-hint` + any pointerdown → `openWindow()`; removed ⤢ button; `revealTable(name)` without fit, `fitToTable` deleted (10 callers updated); `reflowFocus()` (async, `focusLayoutToken`) — ELK layered-lr over the focused subset on enter/add/remove, normalized to origin; ref-panel rows get `.focused` when already in focus; `openWindow` passes `ctx`/`blockEl` to `ErdWindowModal` → window `Diagram` opts so drags persist `@pos/@view` in the note; focus restore in constructor gated to window mode** |
+| **`styles.css` (v10)** | **`.dbml-static` (pointer cursor), `.dbml-static-hint`, `.dbml-refpanel-row.focused`; removed `.dbml-icon-link`** |
 
 Everything else remains as upstream 0.1.21 (`manifest.json`, `versions.json`).
 

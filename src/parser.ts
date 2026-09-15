@@ -550,6 +550,22 @@ export function layoutLockLine(locked: boolean): string {
   return locked ? `// @layoutLocked` : `// @layoutLocked false`;
 }
 
+// foco persistido en el archivo: `// @focusOn TablaA,TablaB` lista las tablas
+// enfocadas; línea ausente = diagrama completo.
+export function parseFocusOn(src: string): string[] | null {
+  const m = src.match(/\/\/\s*@focusOn\b\s*([^\n]*)/i);
+  if (!m) return null;
+  const names = m[1]
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return names.length ? names : null;
+}
+
+export function focusOnLine(names: string[]): string {
+  return `// @focusOn ${names.join(",")}`;
+}
+
 export function parsePositions(
   src: string
 ): Record<string, { x: number; y: number }> {
