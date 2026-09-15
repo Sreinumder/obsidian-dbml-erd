@@ -421,6 +421,15 @@ single consistent scheme and adds a redesigned table navigator.
 - **Double-click the zoom percentage jumps to 100%.** A `dblclick` on the
   `dbml-zoom-pct` readout calls `setZoomPct(100)` (keeps the canvas centre
   fixed) — separate from the single-click preset menu.
+- **Zoom is bounded (25%–400%).** Interactive zoom (wheel, `+`/`−`,
+  preset menu) is clamped to the same range as the preset menu; only the
+  full-diagram `fit` may go below 25% (deliberate).
+- **No infinite canvas dragging.** `applyView()` now runs `clampView()`: the
+  viewport is constrained so at least 40 px of table stays visible on each
+  axis — you can never pan the whole diagram out of the frame.
+- **Watch zoom floor of 75%.** If the current zoom is below 75%, watching a
+  table jumps to 100% and centres it (`centerCameraOn`); at 75% or above the
+  normal minimal-pan rule applies (keep your zoom).
 - **Dropdown hover = temporary centred watch (peek).** `mouseenter` on a
   dropdown row centres the table (100% zoom, min-fit fallback — `centerCameraOn`,
   the old fit-to-table logic alone for this preview); the camera that was active

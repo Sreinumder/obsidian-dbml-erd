@@ -209,6 +209,12 @@ export default class DbmlErdPlugin extends Plugin {
 }
 
 class Diagram extends MarkdownRenderChild {
+  // límites del zoom interactivo (coinciden con el menú de presets 25–400%).
+  // El encuadre del diagrama completo (fit) puede bajar de 25%: es voluntario.
+  private static readonly MIN_ZOOM = 0.25;
+  private static readonly MAX_ZOOM = 4;
+  // px de tabla que deben seguir visibles en el marco aunque se arrastre todo.
+  private static readonly KEEP_VISIBLE = 40;
   private model: Model;
   private pos: Record<string, NodePos>;
   private elkEdges: Pt[][]; // ruta ELK original por ref
@@ -1371,6 +1377,10 @@ class Diagram extends MarkdownRenderChild {
     } else {
       this.view.k = pct / 100;
     }
+    this.view.k = Math.max(
+      Diagram.MIN_ZOOM,
+      Math.min(Diagram.MAX_ZOOM, this.view.k)
+    );
     this.applyView();
     this.scheduleSaveLayout();
     this.closeZoomMenu();
@@ -1701,8 +1711,12 @@ class Diagram extends MarkdownRenderChild {
     this.redrawHandles();
     this.updateFocusUI();
     // vigilar ya no salta ni hace zoom: solo el mínimo pan si la tabla no está
-    // del todo en el marco (si ya cabe entera, la cámara NO se mueve).
+    // del todo en el marco (si ya cabe entera, la cámara NO se mueve)… salvo
+    // por el SUELO de zoom: si estás por debajo del 75%, vigilar sube a 100%
+    // y coloca la tabla en el centro (si no, te quedas donde estás a nivel zoom).
+    const kBefore = this.view.k;
     this.ensureTableVisible(name);
+    if (kBefore < 0.75) this.centerCameraOn(name);
   }
 
   // Deshace una "vigilancia temporal" de hover: restaura la cámara que había
@@ -2671,13 +2685,18 @@ class Diagram extends MarkdownRenderChild {
       const tgt = e.target as Element | null;
       if (tgt?.closest?.(".dbml-dd, .dbml-refpanel, .dbml-zoom-menu")) return;
       e.preventDefault();
-      const f = e.deltaY < 0 ? 1.12 : 0.89;
       const r = host.getBoundingClientRect();
       const mx = e.clientX - r.left;
       const my = e.clientY - r.top;
+      // zoom con tope: 25%–400% (el anclaje al cursor usa la fracción efectiva)
+      const k2 = Math.max(
+        Diagram.MIN_ZOOM,
+        Math.min(Diagram.MAX_ZOOM, this.view.k * (e.deltaY < 0 ? 1.12 : 0.89))
+      );
+      const f = k2 / this.view.k;
       this.view.x = mx - (mx - this.view.x) * f;
       this.view.y = my - (my - this.view.y) * f;
-      this.view.k *= f;
+      this.view.k = k2;
       this.applyView();
       this.redrawHandles();
       this.scheduleSaveLayout();
@@ -2685,12 +2704,71 @@ class Diagram extends MarkdownRenderChild {
   }
 
   private zoom(f: number) {
-    this.view.k *= f;
+    this.view.k = Math.max(
+      Diagram.MIN_ZOOM,
+      Math.min(Diagram.MAX_ZOOM, this.view.k * f)
+    );
     this.applyView();
     this.redrawHandles();
     this.scheduleSaveLayout();
   }
+
+  // ---- límites de la cámara ----
+  // caja envolvente del contenido que se está mostrando (normal o modo enfoque).
+  private contentBounds():
+    | { minX: number; minY: number; maxX: number; maxY: number }
+    | null {
+    let minX = 1e9,
+      minY = 1e9,
+      maxX = -1e9,
+      maxY = -1e9;
+    let any = false;
+    for (const t of this.visibleTables()) {
+      const P = this.px(t.name);
+      if (!P) continue;
+      any = true;
+      const w = P.w || NODE_W;
+      const h = P.h || HEAD_H + t.cols.length * ROW_H;
+      minX = Math.min(minX, P.x);
+      minY = Math.min(minY, P.y);
+      maxX = Math.max(maxX, P.x + w);
+      maxY = Math.max(maxY, P.y + h);
+    }
+    return any ? { minX, minY, maxX, maxY } : null;
+  }
+
+  // impide arrastrar el lienzo "hasta el infinito": siempre quedan al menos
+  // KEEP_VISIBLE px de tabla en pantalla en cada eje. No restringe el zoom.
+  private clampView() {
+    const b = this.contentBounds();
+    if (!b) return;
+    const r = this.svg.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return;
+    const k = this.view.k;
+    const keep = Diagram.KEEP_VISIBLE;
+    const vw = r.width / k;
+    const vh = r.height / k;
+    // rango permitido del borde izdo/sup del viewport (en coordenadas de mundo).
+    // Cuando el contenido cabe sobrado (rango vacío) no se hace nada para no
+    // "sacar" la cámara de donde estaba.
+    const loX = b.minX - vw + keep;
+    const hiX = b.maxX - keep;
+    if (hiX >= loX) {
+      const vL = -this.view.x / k;
+      this.view.x = -Math.min(Math.max(vL, loX), hiX) * k;
+    }
+    const loY = b.minY - vh + keep;
+    const hiY = b.maxY - keep;
+    if (hiY >= loY) {
+      const vT = -this.view.y / k;
+      this.view.y = -Math.min(Math.max(vT, loY), hiY) * k;
+    }
+  }
+
   private applyView() {
+    // todas las mutaciones de cámara pasan por aquí: se comprueban los límites
+    // de arrastre (deja por lo menos KEEP_VISIBLE px de tabla en el marco).
+    this.clampView();
     this.vp.setAttribute(
       "transform",
       `translate(${this.view.x},${this.view.y}) scale(${this.view.k})`
