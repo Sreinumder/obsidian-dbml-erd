@@ -152,13 +152,44 @@ memory of the runtime state:
 - **New i18n keys:** `windowOpen`, `windowTitle`, `windowCode`, `windowCopy`,
   `windowCopied`, `windowCopyError`, `windowExit` (en + es).
 
+### 6. Editable code panel, interaction redesign, remove in-block fullscreen (branch `feat/focus-and-ref-ui`)
+
+- **Removed the in-block fullscreen implementation** (`⛶` button, `fullscreenchange`
+  observer, `enterFullscreen`/`toggleFullscreen`, `fullscreenBlock` state). Fullscreen
+  now lives exclusively in the full-window overlay.
+- **Editable code panel.** The right-hand panel in the overlay is now a monospace
+  `<textarea>` with live preview: edits re-render the diagram (debounced 400 ms).
+  A **Save** button writes the changes back to the note, merging the clean DBML
+  with the existing `@pos/@view/@size/@edge` annotation lines (they are hidden
+  in the editor and re-injected on save). A stale-render guard prevents rapid
+  typing from producing out-of-order diagram updates.
+- **Resizable split** between diagram and code panel via a drag handle.
+- **Interaction redesign on table nodes.** Old left-click menus (`openHeaderMenu`,
+  `openColumnMenu` — rename, change type, set color, focus, show notes) have been
+  removed entirely. Replaced by:
+  - **Left-click / drag** → move the table (unchanged).
+  - **Middle-click** → focus on this table only.
+  - **Right-click** → jump to this table (and column, if the click was on a
+    column row) in the code editor, scrolling the line into view and placing the
+    cursor at the start of the definition.
+- **Jump-to-code** uses `Diagram.opts.onJump`, which `ErdWindowModal` wires to
+  `jumpTo(table, col)`. The method finds the `Table <name>` line (and optionally
+  the column line within it) via regex, focuses the textarea, sets the selection,
+  and scrolls the target line to ~⅓ of the editor height.
+- **New i18n keys:** `windowSave`, `windowSaved`, `windowSaveError` (en + es).
+  Removed keys: `fullscreen`, `fullscreenExit`.
+- **Layout:** diagram fills all space on the left (`flex:1`), code panel on the
+  right (`width: 42%`, drag-resizable, collapsible via the `Code` button).
+- **ELK layout cache cap:** capped at 256 entries to avoid unbounded growth during
+  sustained editing in the overlay window.
+
 ## Files changed vs upstream
 
 | File | Change |
 |---|---|
-| `src/main.ts` | hover tooltips + menus (`drawNodes`, `openHeaderMenu/ColumnMenu`, `short`); focus mode + reference panel (`visibleTables`, `redrawNodes`, `focusTable`, `focusPair`, `fitAll`, `exitFocus`, `drawRefBadges`, `openRefPanel`, `closeRefPanel`, `updateFocusUI`, `fitToPx`); compact re-layout of focused tables (`layoutCompact`, `px()` accessor, focus-aware `redrawEdges`/`edgePts`/`fit`, drag writes to `layoutPos`, `@pos` persistence keeps original coords); toolbar `✕` + focus label + `⛶` fullscreen button (`toggleFullscreen`, `fullscreenchange` refit, exit on unload); Escape handler; empty-canvas click exits focus; toolbar/panel excluded from panning; `ErdWindowModal` full-window overlay + `Diagram.openWindow()` + `opts.window` mode + plugin `layoutFor()` cache helper |
-| `src/i18n.ts` | new keys: `refOutBadge`, `refInBadge`, `refHeadingOut/In`, `refHint`, `refNoRefs`, `focusOn`, `showAll`, `exitFocus`, `fullscreen`, `fullscreenExit`, `windowOpen`, `windowTitle`, `windowCode`, `windowCopy`, `windowCopied`, `windowCopyError`, `windowExit` (en + es) |
-| `styles.css` | toolbar → bottom-left; `.focus-exit` button; `.dbml-focus-label`; `.dbml-node-focus` outline; `.dbml-ref-badge*` pills; `.dbml-refpanel*` list; `:fullscreen` sizing; `.erd-window*` overlay + code-panel styles |
+| `src/main.ts` | focus mode + reference panel; compact re-layout of focused tables; toolbar `✕` + focus label; `ErdWindowModal` full-window overlay (editable code panel with live preview + save-back to note, drag-resizable split, stale-render guard, jump-to-code); `Diagram.openWindow()`, `opts.window` mode, `opts.onJump`, `Diagram.getView()`, plugin `layoutFor()` cache helper (capped at 256); removed in-block fullscreen (`⛶`/`fullscreenchange`/`enterFullscreen`); removed left-click menus + rename/type/color/delete helpers; middle-click → focus, right-click → jump to code |
+| `src/i18n.ts` | new keys: `refOutBadge`, `refInBadge`, `refHeadingOut/In`, `refHint`, `refNoRefs`, `focusOn`, `showAll`, `exitFocus`, `windowOpen`, `windowTitle`, `windowCode`, `windowSave`, `windowSaved`, `windowSaveError`, `windowCopy`, `windowCopied`, `windowCopyError`, `windowExit` (en + es) |
+| `styles.css` | toolbar → bottom-left; `.focus-exit` button; `.dbml-focus-label`; `.dbml-node-focus` outline; `.dbml-ref-badge*` pills; `.dbml-refpanel*` list; `.erd-window*` overlay, editor textarea, resizable split, hidden split; removed `:fullscreen` rules |
 | `main.js` | rebuilt via `npm run build` after the source edits |
 
 Everything else remains as upstream 0.1.21 (`manifest.json`, `versions.json`).

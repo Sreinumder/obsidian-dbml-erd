@@ -15,11 +15,6 @@ import {
   parseDBML,
   Model,
   Ref,
-  setHeaderColorInLine,
-  renameTableInBlock,
-  deleteTableInBlock,
-  renameColumnInBlock,
-  setColumnTypeInBlock,
   setRefOpInBlock,
   parsePositions,
   parseView,
@@ -50,8 +45,6 @@ export default class DbmlErdPlugin extends Plugin {
   selByBlock = new Map<string, string | undefined>();
   // estado de enfoque por bloque; sobrevive a re-renders (vault.process re-render)
   focusState = new Map<string, string[]>();
-  // ruta del bloque que está en pantalla completa (para restaurar tras re-render)
-  fullscreenBlock: string | null = null;
   // cache de layout ELK por estructura DBML (ignorando @pos/@view/@size/@edge):
   // así los re-render que dispara guardar el layout no recalculan ELK ni
   // muestran el placeholder async (esa pausa era el "parpadeo" visible).
@@ -97,6 +90,10 @@ export default class DbmlErdPlugin extends Plugin {
     let layout = this.layoutCache.get(layoutKey);
     if (!layout) {
       layout = await computeLayout(model);
+      // evita que el cache crezca indefinidamente (uso intensivo al editar en
+      // la ventana); al vaciar, el siguiente render del code block calcula de
+      // nuevo con una pausa breve (placeholder) pero no crece la memoria.
+      if (this.layoutCache.size > 256) this.layoutCache.clear();
       this.layoutCache.set(layoutKey, layout);
     }
     return layout;
@@ -205,7 +202,6 @@ class Diagram extends MarkdownRenderChild {
   private saveTimer = 0;
   private hostEl?: HTMLElement;
   private lastSize = "";
-  private colorInput?: HTMLInputElement;
   private plugin?: DbmlErdPlugin;
   private ctx?: MarkdownPostProcessorContext;
   private blockEl?: HTMLElement;
@@ -220,9 +216,11 @@ class Diagram extends MarkdownRenderChild {
   private refPanelCleanup?: () => void;
   private focusBtn?: HTMLButtonElement;
   private focusLabel?: HTMLElement;
-  private fullscreenBtn?: HTMLButtonElement;
-  private userExitFs = false;
-  private hostFsed = false;
+  // salto a la posición del código (overlay): click derecho en tabla/columna.
+  private onJump?: (
+    table: string,
+    col: string | null
+  ) => void;
   // en modo enfoque las tablas se re-dispersan en una fila compacta (se ignora
   // la posición/orientación original); este mapa se descarta al salir.
   private layoutPos: Record<
@@ -243,9 +241,11 @@ class Diagram extends MarkdownRenderChild {
       view?: { x: number; y: number; k: number };
       size?: { w: number; h: number };
       savedEdges?: Record<string, { x: number; y: number }[]>;
-      // true = montado dentro de la ventana/overlay (ErdWindowModal): se
-      // omiten fullscreen propio, botón ⤢ y el handler de Escape del bloque.
+      // true = montado dentro de la ventana/overlay (ErdWindowModal): sin
+      // botón ⤢ y sin handler de Escape del bloque (lo gestiona el Modal).
       window?: boolean;
+      // click derecho en tabla/columna: salta a esa posición en el editor.
+      onJump?: (table: string, col: string | null) => void;
     }
   ) {
     super(parent);
@@ -255,6 +255,7 @@ class Diagram extends MarkdownRenderChild {
     this.plugin = opts?.plugin;
     this.ctx = opts?.ctx;
     this.blockEl = opts?.el;
+    this.onJump = opts?.onJump;
 
     // aplica posiciones guardadas (override del layout ELK)
     if (opts?.savedPos) {
@@ -337,37 +338,6 @@ class Diagram extends MarkdownRenderChild {
       win.title = t("windowOpen");
       this.registerDomEvent(win, "click", () => void this.openWindow());
     }
-    // pantalla completa (el bloque se expande a toda la ventana). En el overlay
-// (opts.window) no se ofrece: la ventana ya ocupa todo y gestiona su fullscreen.
-    if (!opts?.window) {
-      const full = bar.createEl("button", { text: "⛶" });
-      full.title = t("fullscreen");
-      this.fullscreenBtn = full;
-      this.registerDomEvent(full, "click", () => this.toggleFullscreen());
-      this.registerDomEvent(activeDocument, "fullscreenchange", () => {
-        const fs = activeDocument.fullscreenElement === this.hostEl;
-        if (this.fullscreenBtn)
-          this.fullscreenBtn.title = t(fs ? "fullscreenExit" : "fullscreen");
-        // al entrar y al salir el bloque cambia de tamaño: re-encuadrar
-        if (activeDocument.fullscreenElement === this.hostEl ||
-            (activeDocument.fullscreenElement === null && this.hostFsed))
-          activeWindow.requestAnimationFrame(() => this.fit(false));
-        this.hostFsed = fs;
-        // Pantalla salida por algo ajeno al usuario (menú de Obsidian, re-render
-        // del bloque, etc.): el plugin aún espera este bloque en fullscreen -> se
-        // vuelve a entrar automáticamente. El usuario no sale por aquí más que
-        // con Escape/⛶ (que marcan userExitFs).
-        if (
-          !fs &&
-          this.ctx &&
-          this.plugin?.fullscreenBlock === this.ctx.sourcePath &&
-          !this.userExitFs
-        ) {
-          activeWindow.requestAnimationFrame(() => this.enterFullscreen());
-        }
-        if (fs) this.userExitFs = false;
-      });
-    }
     // si se restauró el modo enfoque al montar, el ✕ y la etiqueta del toolbar
     // (creados antes de ese restore) deben reflejar el estado actual
     this.updateFocusUI();
@@ -387,26 +357,15 @@ class Diagram extends MarkdownRenderChild {
     this.applyView();
     // si no hay vista guardada, encuadrar tras montar (necesita medidas del host)
     if (!opts?.view) activeWindow.requestAnimationFrame(() => this.fit());
-    // en el code block se gestiona fullscreen y Escape; en la ventana (overlay)
-    // eso lo hace el propio ErdWindowModal, así que aquí no se registran.
+    // Esc: cierra el panel de referencias o sale del modo enfoque (salvo que
+    // haya un menú/modal abierto, que gestiona su propia tecla Escape). En el
+    // overlay (opts.window) la tecla Escape la gestiona el propio Modal.
     if (!opts?.window) {
-      // restaura la pantalla completa del bloque si sobrevivió a un re-render
-      if (this.ctx && this.plugin?.fullscreenBlock === this.ctx.sourcePath) {
-        activeWindow.requestAnimationFrame(() => this.enterFullscreen());
-      }
-      // Esc: cierra el panel de referencias o sale del modo enfoque (salvo que
-      // haya un menú/modal abierto, que gestiona su propia tecla Escape).
       this.registerDomEvent(activeWindow, "keydown", (e: KeyboardEvent) => {
         if (e.key !== "Escape") return;
         if (this.refPanel) {
           this.closeRefPanel();
           return;
-        }
-        // si está en fullscreen, Esc es del navegador: marcar como salida del
-        // usuario para que fullscreenchange no vuelva a entrar automáticamente
-        if (activeDocument.fullscreenElement === this.hostEl) {
-          this.userExitFs = true;
-          if (this.plugin) this.plugin.fullscreenBlock = null;
         }
         if (!this.focus) return;
         if (activeDocument.querySelector(".menu, .modal-container")) return;
@@ -417,13 +376,7 @@ class Diagram extends MarkdownRenderChild {
 
   onunload() {
     if (this.saveTimer) activeWindow.clearTimeout(this.saveTimer);
-    this.colorInput?.remove();
-    this.colorInput = undefined;
     this.closeRefPanel();
-    // NO salir de pantalla aquí: vault.process dispara re-render → onunload
-    // del bloque viejo. Si llamamos exitFullscreen(), el bloque nuevo se monta
-    // sin pantalla completa. El navegador gestiona la salida naturalmente cuando
-    // el elemento se elimina del DOM.
   }
 
   private btn(bar: HTMLElement, label: string, cb: () => void) {
@@ -437,33 +390,8 @@ class Diagram extends MarkdownRenderChild {
     return this.layoutPos ? this.layoutPos[name] ?? this.pos[name] : this.pos[name];
   }
 
-  private toggleFullscreen() {
-    if (activeDocument.fullscreenElement === this.hostEl) {
-      this.userExitFs = true;
-      if (this.plugin) this.plugin.fullscreenBlock = null;
-      void activeDocument.exitFullscreen();
-    } else {
-      this.enterFullscreen();
-    }
-  }
-
-  // pide pantalla completa y solo recuerda el estado si la entrada tiene éxito;
-  // si falla (p.ej. durante un re-render) se limpia la marca para no arrastrar
-  // al usuario a un fullscreen que no llega a darse en un siguiente re-render.
-  private enterFullscreen() {
-    this.hostEl?.requestFullscreen?.()
-      .then(() => {
-        this.userExitFs = false;
-        if (this.ctx && this.plugin)
-          this.plugin.fullscreenBlock = this.ctx.sourcePath;
-      })
-      .catch(() => {
-        if (this.plugin) this.plugin.fullscreenBlock = null;
-      });
-  }
-
   // abre el diagrama en un overlay a pantalla completa (ErdWindowModal), con el
-  // código DBML en un panel lateral conmutable. Lee el bloque desde el archivo.
+  // código DBML en un panel lateral EDITABLE. Lee el bloque desde el archivo.
   private async openWindow() {
     if (!this.plugin || !this.ctx || !this.blockEl) return;
     const info = this.ctx.getSectionInfo(this.blockEl);
@@ -474,7 +402,10 @@ class Diagram extends MarkdownRenderChild {
     const lines = data.split("\n");
     // contenido del bloque (sin las vallas ```dbml)
     const src = lines.slice(info.lineStart + 1, info.lineEnd).join("\n");
-    new ErdWindowModal(this.plugin.app, this.plugin, src).open();
+    new ErdWindowModal(this.plugin.app, this.plugin, src, {
+      file,
+      lineStart: info.lineStart,
+    }).open();
   }
 
   // fila compacta (tablas pegadas, ignorando su posición original) para las
@@ -1572,7 +1503,8 @@ class Diagram extends MarkdownRenderChild {
     g.addEventListener("pointerdown", (ev: PointerEvent) => {
       ev.stopPropagation();
       ev.preventDefault();
-      dragging = true;
+      // solo el botón izquierdo arrastra; medio = enfocar, derecho = ir al código
+      dragging = ev.button === 0;
       moved = false;
       const tgt = ev.target as Element;
       onHeader =
@@ -1624,143 +1556,35 @@ class Diagram extends MarkdownRenderChild {
         if (moved) {
           this.scheduleSaveLayout();
         } else if (e.type === "pointercancel") {
-          // gesto abortado: no abrir menú
-        } else if (onHeader || colIdx >= 0 || badgeDir) {
-          // Evita que este pointerup llegue a document: el Menu de Obsidian
-          // registra ahí su listener de auto-cierre y, en táctil, el mismo
-          // evento (o un click/touchend sintético) cerraría el menú al instante.
+          // gesto abortado: no hacer nada
+        } else if (e.button === 2) {
+          // click derecho: saltar a la tabla/columna en el code panel (y evitar
+          // que el pointerup cierre cualquier menú/overlay abierto)
+          e.stopPropagation();
+          e.preventDefault();
+          const col =
+            colIdx >= 0
+              ? this.model.tables.find((x) => x.name === name)?.cols[colIdx]
+                  ?.name ?? null
+              : null;
+          this.onJump?.(name, col);
+        } else if (e.button === 1) {
+          // click medio: enfocar SOLO esta tabla
+          e.stopPropagation();
+          e.preventDefault();
+          this.focusTable(name);
+        } else if (badgeDir) {
+          // click izquierdo en la píldora de referencias: abrir el panel
           e.stopPropagation();
           e.preventDefault();
           const ev = e;
-          if (badgeDir) {
-            setTimeout(() => this.openRefPanel(name, badgeDir!, ev), 0);
-          } else if (onHeader) {
-            setTimeout(() => this.openHeaderMenu(name, ev), 0);
-          } else {
-            setTimeout(() => this.openColumnMenu(name, colIdx, ev), 0);
-          }
+          setTimeout(() => this.openRefPanel(name, badgeDir!, ev), 0);
         }
       };
       g.addEventListener("pointermove", mv);
       g.addEventListener("pointerup", up);
       g.addEventListener("pointercancel", up);
     });
-  }
-
-  private openHeaderMenu(name: string, evt: PointerEvent) {
-    if (!this.plugin || !this.ctx || !this.blockEl) return;
-    const menu = new Menu();
-    const tbl = this.model.tables.find((x) => x.name === name);
-    const tNote = tbl?.note;
-    if (tNote) {
-      menu.addItem((i) =>
-        i.setIcon("info").setTitle(this.short(tNote, 200))
-      );
-      menu.addSeparator();
-    }
-    menu.addItem((i) =>
-      i
-        .setTitle(t("renameTable"))
-        .setIcon("pencil")
-        .onClick(() =>
-          this.promptText(t("renameTablePrompt"), name, (v) =>
-            this.renameTable(name, v)
-          )
-        )
-    );
-    menu.addItem((i) =>
-      i
-        .setTitle(t("pickColor"))
-        .setIcon("palette")
-        .onClick(() => this.pickColor(name))
-    );
-    menu.addItem((i) =>
-      i
-        .setTitle(t("removeColor"))
-        .setIcon("rotate-ccw")
-        .onClick(() => this.setHeaderColor(name, null))
-    );
-    menu.addSeparator();
-    if (this.focus) {
-      menu.addItem((i) =>
-        i
-          .setTitle(t("showAll"))
-          .setIcon("maximize")
-          .onClick(() => this.exitFocus())
-      );
-      menu.addSeparator();
-    }
-    menu.addItem((i) =>
-      i
-        .setTitle(t("focusOn"))
-        .setIcon("crosshair")
-        .onClick(() => this.focusTable(name))
-    );
-    menu.addSeparator();
-    menu.addItem((i) =>
-      i
-        .setTitle(t("deleteTableMenu"))
-        .setIcon("trash-2")
-        .onClick(() =>
-          this.confirm(
-            t("deleteTableTitle"),
-            t("deleteTableBody", { name }),
-            t("deleteBtn"),
-            () => this.deleteTable(name)
-          )
-        )
-    );
-    menu.showAtMouseEvent(evt);
-  }
-
-  private openColumnMenu(table: string, colIdx: number, evt: PointerEvent) {
-    if (!this.plugin || !this.ctx || !this.blockEl) return;
-    const tbl = this.model.tables.find((x) => x.name === table);
-    const col = tbl?.cols[colIdx];
-    if (!col) return;
-    const menu = new Menu();
-    if (col.note) {
-      menu.addItem((i) =>
-        i.setIcon("info").setTitle(this.short(`${col.name} — ${col.note}`, 200))
-      );
-      menu.addSeparator();
-    }
-    menu.addItem((i) =>
-      i
-        .setTitle(t("renameColumn"))
-        .setIcon("pencil")
-        .onClick(() =>
-          this.promptText(t("renameColumnPrompt"), col.name, (v) =>
-            this.renameColumn(table, col.name, v)
-          )
-        )
-    );
-    menu.addItem((i) =>
-      i
-        .setTitle(t("changeType"))
-        .setIcon("type")
-        .onClick(() =>
-          this.promptText(t("changeTypePrompt"), col.type, (v) =>
-            this.setColType(table, col.name, v)
-          )
-        )
-    );
-    menu.showAtMouseEvent(evt);
-  }
-
-  private promptText(title: string, initial: string, cb: (v: string) => void) {
-    if (!this.plugin) return;
-    new EditModal(this.plugin.app, title, initial, cb).open();
-  }
-
-  private confirm(
-    title: string,
-    body: string,
-    confirmText: string,
-    cb: () => void
-  ) {
-    if (!this.plugin) return;
-    new ConfirmModal(this.plugin.app, title, body, confirmText, cb).open();
   }
 
   private isFence(line: string | undefined): boolean {
@@ -1813,36 +1637,6 @@ class Diagram extends MarkdownRenderChild {
       return lines.join("\n");
     });
     if (!ok) new Notice(notFoundMsg);
-  }
-
-  private renameTable(oldName: string, newName: string) {
-    if (newName === oldName) return;
-    this.editBlock(
-      (l, s, e) => renameTableInBlock(l, s, e, oldName, newName),
-      t("renameTableFail", { name: oldName })
-    );
-  }
-
-  private deleteTable(name: string) {
-    this.editBlock(
-      (l, s, e) => deleteTableInBlock(l, s, e, name),
-      t("deleteTableFail", { name })
-    );
-  }
-
-  private renameColumn(table: string, oldCol: string, newCol: string) {
-    if (newCol === oldCol) return;
-    this.editBlock(
-      (l, s, e) => renameColumnInBlock(l, s, e, table, oldCol, newCol),
-      t("renameColumnFail")
-    );
-  }
-
-  private setColType(table: string, col: string, newType: string) {
-    this.editBlock(
-      (l, s, e) => setColumnTypeInBlock(l, s, e, table, col, newType),
-      t("changeTypeFail")
-    );
   }
 
   // ---- guardado de posiciones / vista ----
@@ -1933,61 +1727,6 @@ class Diagram extends MarkdownRenderChild {
     }
   }
 
-  private pickColor(name: string) {
-    const current =
-      this.model.tables.find((t) => t.name === name)?.headerColor || "";
-    this.colorInput?.remove();
-    const input = activeDocument.createElement("input");
-    this.colorInput = input;
-    input.type = "color";
-    input.value = /^#[0-9a-fA-F]{6}$/.test(current) ? current : "#5c7fa3";
-    input.classList.add("dbml-color-input");
-    activeDocument.body.appendChild(input);
-    const cleanup = () => {
-      input.remove();
-      if (this.colorInput === input) this.colorInput = undefined;
-    };
-    this.registerDomEvent(input, "change", () => {
-      this.setHeaderColor(name, input.value);
-      cleanup();
-    });
-    this.registerDomEvent(input, "blur", cleanup);
-    input.click();
-  }
-
-  private async setHeaderColor(name: string, color: string | null) {
-    if (!this.plugin || !this.ctx || !this.blockEl) return;
-    const info = this.ctx.getSectionInfo(this.blockEl);
-    if (!info) {
-      new Notice(t("locateBlockFail"));
-      return;
-    }
-    const file = this.plugin.app.vault.getAbstractFileByPath(
-      this.ctx.sourcePath
-    );
-    if (!(file instanceof TFile)) return;
-    let done = false;
-    await this.plugin.app.vault.process(file, (data) => {
-      const lines = data.split("\n");
-      const range = this.blockRange(lines, info.lineStart);
-      if (!range) return data;
-      for (let i = range[0]; i <= range[1] && i < lines.length; i++) {
-        const updated = setHeaderColorInLine(lines[i], name, color);
-        if (updated !== null) {
-          lines[i] = updated;
-          done = true;
-          break;
-        }
-      }
-      return done ? lines.join("\n") : data;
-    });
-    if (!done) new Notice(t("tableNotFound", { name }));
-  }
-
-  // recorta un texto largo para mostrarlo en una línea de menú (notas).
-  private short(s: string, n: number): string {
-    return s.length > n ? s.slice(0, n - 1) + "…" : s;
-  }
 
   // lee px inline explícitos; ignora "", "100%", "auto", etc.
   private readPx(v?: string): number {
@@ -2093,6 +1832,10 @@ class Diagram extends MarkdownRenderChild {
       `translate(${this.view.x},${this.view.y}) scale(${this.view.k})`
     );
   }
+  // vista actual (pan/zoom), para conservarla al re-renderizar en la ventana.
+  getView() {
+    return { x: this.view.x, y: this.view.y, k: this.view.k };
+  }
   private fit(persist = false) {
     const r = this.svg.getBoundingClientRect();
     if (r.width === 0) return;
@@ -2125,20 +1868,39 @@ class Diagram extends MarkdownRenderChild {
   }
 }
 
-// Ventana/overlay a pantalla completa con el ERD (siempre a pantalla completa)
-// y un panel lateral conmutable con el código DBML (solo lectura + copiar).
+// Ventana/overlay a pantalla completa con el ERD a la izquierda y un editor
+// DBML conmutable a la derecha (previsualización en vivo + guardar en la nota).
 class ErdWindowModal extends Modal {
   private plugin: DbmlErdPlugin;
-  private source: string;
+  private clean: string;
+  private file: TFile;
+  private lineStart: number;
   private diagram?: Diagram;
+  private drawHost?: HTMLElement;
   private codePanel?: HTMLElement;
   private codeBtn?: HTMLButtonElement;
+  private splitEl?: HTMLElement;
+  private editor?: HTMLTextAreaElement;
   private codeOpen = true;
+  private previewTimer?: number;
+  private previewToken = 0;
+  private view?: { x: number; y: number; k: number };
 
-  constructor(app: App, plugin: DbmlErdPlugin, source: string) {
+  constructor(
+    app: App,
+    plugin: DbmlErdPlugin,
+    source: string,
+    ref: { file: TFile; lineStart: number }
+  ) {
     super(app);
     this.plugin = plugin;
-    this.source = source;
+    this.file = ref.file;
+    this.lineStart = ref.lineStart;
+    // el editor muestra el DBML "limpio": sin las anotaciones @pos/@view/@size/
+    // @edge que gestiona el plugin (se reinyectan al guardar).
+    const lines = source.split("\n");
+    const isAnnot = (l: string) => /^\s*\/\/\s*@(pos|view|size|edge)\b/.test(l);
+    this.clean = lines.filter((l) => !isAnnot(l)).join("\n").replace(/\n+$/, "");
   }
 
   onOpen() {
@@ -2152,16 +1914,16 @@ class ErdWindowModal extends Modal {
     const codeBtn = head.createEl("button", { text: t("windowCode") });
     codeBtn.classList.add("erd-window-btn", "is-active");
     this.codeBtn = codeBtn;
-    codeBtn.addEventListener("click", () => {
-      this.codeOpen = !this.codeOpen;
-      codeBtn.classList.toggle("is-active", this.codeOpen);
-      this.codePanel?.toggleClass("hidden", !this.codeOpen);
-    });
+    codeBtn.addEventListener("click", () => this.setCodeOpen(!this.codeOpen));
+
+    const saveBtn = head.createEl("button", { text: t("windowSave") });
+    saveBtn.classList.add("erd-window-btn");
+    saveBtn.addEventListener("click", () => void this.save());
 
     const copyBtn = head.createEl("button", { text: t("windowCopy") });
     copyBtn.classList.add("erd-window-btn");
     copyBtn.addEventListener("click", () => {
-      void navigator.clipboard.writeText(this.source).then(
+      void navigator.clipboard.writeText(this.editor?.value ?? "").then(
         () => new Notice(t("windowCopied")),
         () => new Notice(t("windowCopyError"))
       );
@@ -2172,26 +1934,103 @@ class ErdWindowModal extends Modal {
     exitBtn.addEventListener("click", () => this.close());
 
     const body = this.contentEl.createDiv({ cls: "erd-window-body" });
-    const draw = body.createDiv({ cls: "erd-window-draw" });
+    this.drawHost = body.createDiv({ cls: "erd-window-draw" });
+    const split = body.createDiv({ cls: "erd-window-split" });
     const code = body.createDiv({ cls: "erd-window-code" });
     this.codePanel = code;
-    code.createEl("pre").createEl("code", { text: this.source });
+    const ta = code.createEl("textarea", { cls: "erd-window-editor" });
+    ta.value = this.clean;
+    ta.spellcheck = false;
+    ta.wrap = "off";
+    this.editor = ta;
+    ta.addEventListener("input", () => this.schedulePreview());
+    this.splitEl = split;
+    this.initSplit(split, code, body);
 
-    void this.renderDiagram(draw);
+    void this.renderDiagram(this.drawHost, this.clean);
 
-    // "siempre a pantalla completa": se pide fullscreen al abrir; si el entorno
-    // lo rechaza, el overlay ya ocupa toda la ventana de todos modos.
     this.containerEl.requestFullscreen?.().catch(() => {});
   }
 
-  private async renderDiagram(host: HTMLElement) {
+  private setCodeOpen(open: boolean) {
+    this.codeOpen = open;
+    this.codeBtn?.classList.toggle("is-active", open);
+    this.codePanel?.toggleClass("hidden", !open);
+    this.splitEl?.toggleClass("hidden", !open);
+  }
+
+  // muestra el editor y lleva el foco a la tabla (col opcional) resaltándola.
+  jumpTo(table: string, col: string | null) {
+    const ed = this.editor;
+    if (!ed) return;
+    const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const tableRe = new RegExp(
+      `^[ \\t]*Table[ \\t]+["']?${esc(table)}["']?\\b`,
+      "m"
+    );
+    let index = -1;
+    const tm = tableRe.exec(ed.value);
+    if (tm) {
+      index = tm.index;
+      if (col) {
+        const rest = ed.value.slice(index);
+        const colRe = new RegExp(
+          `^[ \\t]*["']?${esc(col)}["']?[ \\t]`,
+          "m"
+        );
+        const cm = colRe.exec(rest);
+        if (cm) index += cm.index;
+      }
+    } else {
+      index = ed.value.indexOf(table);
+    }
+    if (index < 0) return;
+    this.setCodeOpen(true);
+    ed.focus();
+    ed.setSelectionRange(index, index + (col ?? table).length);
+    // desplazar la línea objetivo a ~1/3 de la altura visible
+    const lh = parseFloat(getComputedStyle(ed).lineHeight) || 18;
+    const line = ed.value.slice(0, index).split("\n").length - 1;
+    ed.scrollTop = Math.max(0, line * lh - ed.clientHeight / 3);
+  }
+
+  private schedulePreview() {
+    if (this.previewTimer) activeWindow.clearTimeout(this.previewTimer);
+    this.previewTimer = activeWindow.setTimeout(() => void this.preview(), 400);
+  }
+
+  private async preview() {
+    if (!this.drawHost || !this.editor) return;
+    // conserva el encuadre (pan/zoom) entre re-render mientras se escribe
+    this.view = this.diagram?.getView() ?? this.view;
+    this.diagram?.unload();
+    this.diagram = undefined;
+    this.drawHost.empty();
+    const token = ++this.previewToken;
+    await this.renderDiagram(
+      this.drawHost,
+      this.editor.value,
+      this.view,
+      token
+    );
+  }
+
+  private async renderDiagram(
+    host: HTMLElement,
+    src: string,
+    view?: { x: number; y: number; k: number },
+    token?: number
+  ) {
+    const stale = () => token !== undefined && token !== this.previewToken;
     try {
-      const model = parseDBML(this.source);
+      const model = parseDBML(src);
+      if (stale()) return;
       if (!model.tables.length) {
         host.createDiv({ cls: "dbml-erd-wrap", text: t("noTables") });
         return;
       }
-      const layout = await this.plugin.layoutFor(this.source, model);
+      const layout = await this.plugin.layoutFor(src, model);
+      if (stale()) return;
       // copia defensiva: el Diagram mueve/edita nodos y no queremos tocar la
       // caché compartida de layouts.
       const nodes: LayoutResult["nodes"] = {};
@@ -2203,13 +2042,15 @@ class ErdWindowModal extends Modal {
         {
           plugin: this.plugin,
           window: true,
-          savedPos: parsePositions(this.source),
-          view: parseView(this.source) ?? undefined,
-          size: parseSize(this.source) ?? undefined,
-          savedEdges: parseEdges(this.source),
+          savedPos: parsePositions(src),
+          view: view ?? parseView(src) ?? undefined,
+          size: parseSize(src) ?? undefined,
+          savedEdges: parseEdges(src),
+          onJump: (table, col) => this.jumpTo(table, col),
         }
       );
     } catch (e) {
+      if (stale()) return;
       host.createDiv({
         cls: "dbml-erd-wrap",
         text: t("layoutError", { msg: e instanceof Error ? e.message : String(e) }),
@@ -2217,10 +2058,80 @@ class ErdWindowModal extends Modal {
     }
   }
 
+  // escribe el código editado de vuelta en el bloque, conservando las
+  // anotaciones @pos/@view/@size/@edge del plugin que hubiera en el archivo.
+  private async save() {
+    if (!this.editor) return;
+    const isAnnot = (l: string) => /^\s*\/\/\s*@(pos|view|size|edge)\b/.test(l);
+    let ok = true;
+    await this.plugin.app.vault.process(this.file, (data) => {
+      const lines = data.split("\n");
+      const range = this.blockRange(lines, this.lineStart);
+      if (!range) {
+        ok = false;
+        return data;
+      }
+      const [open, close] = range;
+      const annots = lines.slice(open + 1, close).filter(isAnnot);
+      const body = this.editor!.value.replace(/\n+$/, "").split("\n");
+      return [
+        ...lines.slice(0, open + 1),
+        ...body,
+        ...annots,
+        lines[close],
+        ...lines.slice(close + 1),
+      ].join("\n");
+    });
+    new Notice(t(ok ? "windowSaved" : "windowSaveError"));
+  }
+
+  private blockRange(
+    lines: string[],
+    lineStart: number
+  ): [number, number] | null {
+    const isFence = (l: string | undefined) => !!l && /^\s*(```|~~~)/.test(l);
+    if (!isFence(lines[lineStart])) return null;
+    for (let i = lineStart + 1; i < lines.length; i++) {
+      if (isFence(lines[i])) return [lineStart, i];
+    }
+    return null;
+  }
+
+  // separador arrastrable entre el diagrama y el editor de código
+  private initSplit(split: HTMLElement, code: HTMLElement, body: HTMLElement) {
+    let dragging = false;
+    split.addEventListener("pointerdown", (ev: PointerEvent) => {
+      dragging = true;
+      try {
+        split.setPointerCapture(ev.pointerId);
+      } catch {
+        /* noop */
+      }
+      ev.preventDefault();
+    });
+    split.addEventListener("pointermove", (ev: PointerEvent) => {
+      if (!dragging) return;
+      const r = body.getBoundingClientRect();
+      const w = Math.min(Math.max(r.right - ev.clientX, 240), r.width - 240);
+      code.style.width = `${w}px`;
+      code.style.maxWidth = `${w}px`;
+    });
+    const stop = (ev: PointerEvent) => {
+      dragging = false;
+      try {
+        split.releasePointerCapture(ev.pointerId);
+      } catch {
+        /* noop */
+      }
+    };
+    split.addEventListener("pointerup", stop);
+    split.addEventListener("pointercancel", stop);
+  }
+
   onClose() {
+    if (this.previewTimer) activeWindow.clearTimeout(this.previewTimer);
     this.diagram?.unload();
     this.diagram = undefined;
-    // salir de fullscreen si este overlay lo poseía
     if (activeDocument.fullscreenElement === this.containerEl)
       activeDocument.exitFullscreen?.().catch(() => {});
     this.contentEl.empty();
