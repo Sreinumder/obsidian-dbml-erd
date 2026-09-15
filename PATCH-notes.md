@@ -400,6 +400,36 @@ single consistent scheme and adds a redesigned table navigator.
   `.dbml-static` (pointer cursor over the whole canvas), `.dbml-static-hint` and
   `.dbml-refpanel-row.focused`.
 
+### 11. Minimal-pan watch, dropdown hover peek + per-mode camera (branch `feat/focus-and-ref-ui`)
+
+- **Fixed: dropdown list could not scroll.** The canvas `wheel` handler (zoom)
+  `preventDefault()`s every wheel event, and the dropdown lives inside the
+  canvas — so the wheel over the table list was swallowed and the list never
+  scrolled. The zoom handler now returns early when the event target is inside
+  `.dbml-dd`, `.dbml-refpanel` or `.dbml-zoom-menu` (their own overflow-shift).
+  The panning `pointerdown` also exempts those same surfaces so clicking a list
+  row never starts a canvas drag.
+- **Watch = minimal pan, never zoom/or jump.** `revealTable` (dropdown click,
+  badges, ref-panel rows, arrows, caret movement in the editor) now calls
+  `ensureTableVisible(name)`: if the table is entirely inside the frame the
+  camera does NOT move at all; if it sticks out, it computes the *minimum*
+  per-axis translation (in world coords, current zoom kept) to bring the whole
+  node in view and pans exactly that — as little on-screen change as possible.
+  Tables wider/taller than the viewport fall back to centering that axis.
+- **Dropdown hover = temporary centred watch (peek).** `mouseenter` on a
+  dropdown row centres the table (100% zoom, min-fit fallback — `centerCameraOn`,
+  the old fit-to-table logic alone for this preview); the camera that was active
+  before the first hover is saved once (`hoverCamera`) and restored when the
+  pointer leaves the panel, the dropdown closes, or a row is clicked (a real
+  click ends the peek and keeps the watch camera).
+- **Camera kept per mode (normal ↔ focus).** Entering focus saves the current
+  camera as `normalCamera` and restores the previous `focusCamera` (or fits the
+  focused set the very first time); leaving focus saves `focusCamera` and
+  restores `normalCamera`. The `⊞` toggle, `focusTable`, `focusPair` and
+  `fitAll`/"Clear all" all round-trip through this, so "at what part and at what
+  zoom" you were is remembered independently in each mode. Focus-camera changes
+  are never persisted (saves stay paused during focus).
+
 ## Files changed vs upstream
 
 | File | Change |
@@ -418,6 +448,7 @@ single consistent scheme and adds a redesigned table navigator.
 | **`main.js` (v9)** | rebuilt via `npm run build` after the source edits |
 | **`src/main.ts` (v10)** | **`Diagram.interactive` (static in-note vs window); toolbar/menus/pan-zoom/drag/edge-select/Escape gated by it; static host = `.dbml-static` + `.dbml-static-hint` + any pointerdown → `openWindow()`; removed ⤢ button; `revealTable(name)` without fit, `fitToTable` deleted (10 callers updated); `reflowFocus()` (async, `focusLayoutToken`) — ELK layered-lr over the focused subset on enter/add/remove, normalized to origin; ref-panel rows get `.focused` when already in focus; `openWindow` passes `ctx`/`blockEl` to `ErdWindowModal` → window `Diagram` opts so drags persist `@pos/@view` in the note; focus restore in constructor gated to window mode** |
 | **`styles.css` (v10)** | **`.dbml-static` (pointer cursor), `.dbml-static-hint`, `.dbml-refpanel-row.focused`; removed `.dbml-icon-link`** |
+| **`src/main.ts` (v11)** | **dropdown wheel-scroll fixed (wheel/pointerdown ignore `.dbml-dd`/`.dbml-refpanel`/`.dbml-zoom-menu`); `ensureTableVisible()` minimal-pan watch (no zoom, no move when fully in frame); `centerCameraOn()` + `endHoverWatch()` + `hoverCamera` for dropdown hover peek; `normalCamera`/`focusCamera` retained per mode across `applyFocusView(entering)`/`fitAll` — focus toggles restore "where and at what zoom" per mode** |
 
 Everything else remains as upstream 0.1.21 (`manifest.json`, `versions.json`).
 

@@ -287,6 +287,15 @@ class Diagram extends MarkdownRenderChild {
   private exitBtn?: HTMLButtonElement;
   // menú de zooms estándar (al hacer clic en el porcentaje de la barra)
   private zoomMenu?: HTMLElement;
+  // cámara recordada por modo: al entrar en enfoque se guarda la del modo
+  // normal y se restaura al salir; lo mismo para la del modo enfoque, de modo
+  // que alternar el ⊞ conserva "dónde estabas y a qué zoom" en cada modo.
+  private normalCamera: { x: number; y: number; k: number } | null = null;
+  private focusCamera: { x: number; y: number; k: number } | null = null;
+  // "vigilancia temporal" al pasar el ratón por el dropdown: se guarda la cámara
+  // previa al primer hover (hoverCamera) y se restaura al salir del panel.
+  private hoverCamera: { x: number; y: number; k: number } | null = null;
+  private hoveredTable: string | null = null;
 
   constructor(
     parent: HTMLElement,
@@ -441,6 +450,9 @@ class Diagram extends MarkdownRenderChild {
       const panel = host.createDiv({ cls: "dbml-dd" });
       panel.style.display = "none";
       this.dropdownPanel = panel;
+      // al salir el cursor del panel se deshace la "vigilancia temporal" del
+      // hover (se vuelve a la cámara que había antes del primer hover).
+      panel.addEventListener("mouseleave", () => this.endHoverWatch());
       this.updateFocusUI();
     } else {
       // incrustado en la nota = ESTÁTICO (sin toolbar/pan/zoom/arrastre): un
@@ -1303,6 +1315,7 @@ class Diagram extends MarkdownRenderChild {
   }
 
   private closeDropdown() {
+    this.endHoverWatch();
     if (this.dropdownPanel) this.dropdownPanel.style.display = "none";
   }
 
@@ -1423,9 +1436,30 @@ class Diagram extends MarkdownRenderChild {
     if (this.watchedTable === tbl.name) row.classList.add("watched");
     const label = row.createSpan({ cls: "dbml-dd-name", text: tbl.name });
     label.title = tbl.name;
-    // click en la fila: vigilar la tabla (centrar + mostrar todo)
+    // hover: "vigilancia temporal" — mientras el cursor pasa por la fila se
+    // centra la tabla (peek); al salir del panel se vuelve a la cámara previa
+    // (endHoverWatch). La cámara previa se guarda solo con el primer hover.
+    row.addEventListener("mouseenter", () => {
+      if (!this.hoverCamera) {
+        this.hoverCamera = {
+          x: this.view.x,
+          y: this.view.y,
+          k: this.view.k,
+        };
+      }
+      this.hoveredTable = tbl.name;
+      this.centerCameraOn(tbl.name);
+    });
+    row.addEventListener("mouseleave", () => {
+      if (this.hoveredTable === tbl.name) this.hoveredTable = null;
+    });
+    // click en la fila: vigilar la tabla (mínimo pan para mostrarla entera).
+    // El clic concluye la sesión de hover: la cámara que deje el reveal es la
+    // definitiva y no debe revertirse al sacar el cursor.
     row.addEventListener("click", (e) => {
       e.stopPropagation();
+      this.hoverCamera = null;
+      this.hoveredTable = null;
       this.revealTable(tbl.name);
       this.markDdWatched(tbl.name);
     });
@@ -1459,6 +1493,7 @@ class Diagram extends MarkdownRenderChild {
   // añade la tabla al modo enfoque SIN reemplazar el conjunto existente (multi
   // tabla); si ya está enfocada la quita (y si era la última, sale del modo).
   private toggleFocusTable(name: string) {
+    const entering = !this.focus;
     if (this.focus && this.focus.has(name)) {
       this.focus.delete(name);
       if (this.focus.size === 0) {
@@ -1472,7 +1507,7 @@ class Diagram extends MarkdownRenderChild {
     if (!this.focus) this.focus = new Set<string>();
     this.focus.add(name);
     this.saveFocusState();
-    this.applyFocusView();
+    this.applyFocusView(entering);
   }
 
   // banda al navegador del toolbar: tabla anterior/siguiente (alfabético).
@@ -1487,16 +1522,27 @@ class Diagram extends MarkdownRenderChild {
     this.revealTable(names[(idx + dir + names.length) % names.length]);
   }
 
-  private applyFocusView() {
+  // aplica el modo enfoque: provisionalmente la fila compacta mientras ELK
+// calcula el jerárquico L→R del subconjunto. `entering` marca la transición
+// modo normal → enfoque: guarda la cámara normal y, la próxima vez, restaura
+// la cámara del enfoque (o encuadra todo el subconjunto la primera vez).
+  private applyFocusView(entering = false) {
+    if (entering) {
+      this.normalCamera = { x: this.view.x, y: this.view.y, k: this.view.k };
+    }
     this.closeRefPanel();
-    // provisional: fila compacta mientras ELK calcula el jerárquico L→R del
-    // subconjunto enfocado (esta disposición se descarta al salir).
     this.layoutPos = this.layoutCompact(this.focus ?? new Set<string>());
     this.redrawNodes();
     this.redrawEdges();
     this.redrawHandles();
     this.updateFocusUI();
-    this.fit(true);
+    if (entering && this.focusCamera) {
+      this.view = { ...this.focusCamera };
+      this.applyView();
+      this.redrawHandles();
+    } else {
+      this.fit(false);
+    }
     // sistema de layout propio del modo enfoque: jerárquico (L→R) al añadir/quitar
     void this.reflowFocus();
   }
@@ -1510,11 +1556,12 @@ class Diagram extends MarkdownRenderChild {
   // clic medio en arista/badge: trae la tabla referenciada junto a la actual
   // (ambas a cuadro) sin descartar otras tablas ya enfocadas.
   private focusPair(a: string, b: string) {
+    const entering = !this.focus;
     if (!this.focus) this.focus = new Set<string>();
     this.focus.add(a);
     this.focus.add(b);
     this.saveFocusState();
-    this.applyFocusView();
+    this.applyFocusView(entering);
   }
 
   // persiste el estado de enfoque en el plugin para que sobreviva a re-renders
@@ -1587,15 +1634,27 @@ class Diagram extends MarkdownRenderChild {
   // ⊡ del toolbar o menú "Show all": vuelve al diagrama completo.
   private fitAll() {
     const hadFocus = !!this.focus;
+    // al salir del modo enfoque se recuerda su cámara (para volver a ella al
+    // re-entrar) y se restaura la cámara del modo normal que había al entrar.
+    if (hadFocus) {
+      this.focusCamera = { x: this.view.x, y: this.view.y, k: this.view.k };
+    }
     this.focus = null;
     this.closeRefPanel();
     this.layoutPos = null; // descarta el arreglo compacto
     if (hadFocus) {
+      this.endHoverWatch();
       this.saveFocusState();
       this.redrawNodes();
       this.redrawEdges();
       this.redrawHandles();
       this.updateFocusUI();
+      if (this.normalCamera) {
+        this.view = { ...this.normalCamera };
+        this.applyView();
+        this.redrawHandles();
+        return;
+      }
     }
     this.fit(true);
   }
@@ -1628,6 +1687,88 @@ class Diagram extends MarkdownRenderChild {
     this.redrawEdges();
     this.redrawHandles();
     this.updateFocusUI();
+    // vigilar ya no salta ni hace zoom: solo el mínimo pan si la tabla no está
+    // del todo en el marco (si ya cabe entera, la cámara NO se mueve).
+    this.ensureTableVisible(name);
+  }
+
+  // Deshace una "vigilancia temporal" de hover: restaura la cámara que había
+  // antes del primer hover del ratón. No-op si no había ninguna en curso.
+  private endHoverWatch() {
+    if (this.hoverCamera) {
+      this.view = { ...this.hoverCamera };
+      this.applyView();
+      this.redrawHandles();
+    }
+    this.hoverCamera = null;
+    this.hoveredTable = null;
+  }
+
+  // centra la tabla en el lienzo a zoom 100% (o el máximo que la deje entera)…
+  // usada SOLO por el hover temporal del dropdown (peek).
+  private centerCameraOn(name: string) {
+    const P = this.px(name);
+    if (!P) return;
+    const r = this.svg.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return;
+    const t = this.model.tables.find((x) => x.name === name);
+    const w = P.w || NODE_W;
+    const h = P.h || HEAD_H + (t ? t.cols.length * ROW_H : 0);
+    const k = isFinite(Math.min(1, (r.width - 24) / w, (r.height - 24) / h))
+      ? Math.min(1, (r.width - 24) / w, (r.height - 24) / h)
+      : 1;
+    this.view.k = k > 0 ? k : 0.25;
+    this.view.x = r.width / 2 - (P.x + w / 2) * this.view.k;
+    this.view.y = r.height / 2 - (P.y + h / 2) * this.view.k;
+    this.applyView();
+    this.redrawHandles();
+  }
+
+  // Mueve la cámara lo MÍNIMO para que la tabla quede entera dentro del marco,
+  // sin zoom y con el menor cambio posible en pantalla: si ya cabe completa no
+  // hace nada (ni un píxel). Compensa cada eje por separado.
+  private ensureTableVisible(name: string) {
+    const P = this.px(name);
+    if (!P) return;
+    const r = this.svg.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return;
+    const t = this.model.tables.find((x) => x.name === name);
+    const w = P.w || NODE_W;
+    const h = P.h || HEAD_H + (t ? t.cols.length * ROW_H : 0);
+    const k = this.view.k;
+    const left = P.x,
+      right = P.x + w;
+    const top = P.y,
+      bot = P.y + h;
+    // mundo visible actualmente por el viewport (en coordenadas del mundo)
+    const vLeft = -this.view.x / k;
+    const vTop = -this.view.y / k;
+    const vRight = (-this.view.x + r.width) / k;
+    const vBot = (-this.view.y + r.height) / k;
+    // desplazamiento exigido del viewport en unidades de mundo por cada margen
+    // (d es el cambio del borde izdo del viewport, positivo = mover a la derecha)
+    const dLoX = right - vRight; // para meter el borde derecho
+    const dHiX = left - vLeft; // para meter el borde izquierdo
+    let dX: number;
+    if (dHiX < dLoX) {
+      // tabla más ancha que la vista: imposible mostrarla entera; centrar x
+      dX = (left + right) / 2 - (vLeft + vRight) / 2;
+    } else {
+      dX = Math.min(Math.max(0, dLoX), dHiX);
+    }
+    const dLoY = bot - vBot;
+    const dHiY = top - vTop;
+    let dY: number;
+    if (dHiY < dLoY) {
+      dY = (top + bot) / 2 - (vTop + vBot) / 2;
+    } else {
+      dY = Math.min(Math.max(0, dLoY), dHiY);
+    }
+    if ((dX === 0 && dY === 0) || !isFinite(dX) || !isFinite(dY)) return;
+    this.view.x -= dX * k;
+    this.view.y -= dY * k;
+    this.applyView();
+    this.redrawHandles();
   }
 
   private focusLayoutToken = 0;
@@ -1684,7 +1825,7 @@ class Diagram extends MarkdownRenderChild {
     if (!first) return;
     this.focus = new Set([first]);
     this.saveFocusState();
-    this.applyFocusView();
+    this.applyFocusView(true);
   }
 
   // el candado del layout impide arrastrar las tablas (editores externos)
@@ -2458,8 +2599,14 @@ class Diagram extends MarkdownRenderChild {
       if (tgt.closest(".dbml-edge-hit")) {
         if (tgt.closest(".dbml-edge-handle") || e.button !== 0) return;
       }
-      // el panel de referencias y el toolbar no inician panning ni salen de foco
-      if (tgt.closest(".dbml-refpanel") || tgt.closest(".dbml-erd-toolbar"))
+      // el panel de referencias, el dropdown de tablas, el menú de zoom y el
+      // toolbar no inician panning ni salen de foco
+      if (
+        tgt.closest(".dbml-refpanel") ||
+        tgt.closest(".dbml-erd-toolbar") ||
+        tgt.closest(".dbml-dd") ||
+        tgt.closest(".dbml-zoom-menu")
+      )
         return;
       // botón medio sobre el vacío: alterna el modo enfoque (las tablas/badges/
       // aristas detienen su propio pointerdown y gestionan su clic medio).
@@ -2494,6 +2641,11 @@ class Diagram extends MarkdownRenderChild {
       this.scheduleSaveLayout();
     });
     this.registerDomEvent(host, "wheel", (e: WheelEvent) => {
+      // el ráfaga de zoom no debe comerse el scroll de las listas internas:
+      // el dropdown de tablas y el panel de referencias tienen su propio
+      // desplazamiento y no deben disparar zoom ni bloquearse.
+      const tgt = e.target as Element | null;
+      if (tgt?.closest?.(".dbml-dd, .dbml-refpanel, .dbml-zoom-menu")) return;
       e.preventDefault();
       const f = e.deltaY < 0 ? 1.12 : 0.89;
       const r = host.getBoundingClientRect();
