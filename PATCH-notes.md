@@ -251,6 +251,107 @@ memory of the runtime state:
 - **New i18n keys:** `navPrev`, `navNext`, `navFitWatched`, `renameTitle`,
   `renameBody`, `renameApply` (en + es).
 
+### 9. Unified click model + reachable-table UI (branch `feat/focus-and-ref-ui`)
+
+This iteration replaces the fourth button of almost every interaction with a
+single consistent scheme and adds a redesigned table navigator.
+
+- **One pointer scheme everywhere.** Left = move/pan, right = **watch** the
+  table (reveal it, highlight + fit), middle = (de)focus the table. Applies to
+  table headers, column rows, reference badges, edge arrows and dropdown rows.
+  Edge-*editing* (handles/waypoints/cardinality) is removed entirely; arrows are
+  now click/pan-only: left = pan, right = watch the *other* end, middle = focus
+  both ends.
+- **Focused tables are a set, not one.** Middle-clicking (or `✕`/`+` in the
+  dropdown) adds/removes the table from the focus set; focusing a second table
+  keeps the first. `focusPair(a, b)` is now additive. Empty focus set exits
+  focus mode with a full fit.
+- **Redesigned table dropdown (▾).** Replaces the `◀ <select> ▶` navigator and
+  the in-toolbar focus label. Anchored above the toolbar: search field + a
+  "Focused" section (only without an active query) + an "All tables" section.
+  Clicking a row watches the table; `✕`/`+` toggles focus; middle-click on a
+  row also toggles focus; the watched row is outlined. The dropdown updates live
+  when it is open and closes on outside click or Escape.
+- **Per-column reference badges.** In addition to the header `→n`/`←n` counters,
+  every column row now shows its own `→n`/`←n` pill, right-aligned before the
+  type (NN badge shift left accordingly). They reuse the header badge mechanics
+  and are column-specific.
+- **Single-ref badge = direct action.** If a badge has exactly one unique target,
+  left/right click watches that table and middle-click focuses both (equivalent
+  of clicking the referenced table itself). Hover tooltip lists which
+  `table.column` of which table references it. Multiple targets open the
+  reference picker panel (filtered to the column when the badge is a column).
+- **Double-click jumps to the editor.** On a class name/column and requires the
+  code editor (`onJump`); otherwise it just watches the table.
+- **Layout lock (🔒) and no table editing by default.** The window header gains
+  a lock toggle persisted as a `// @layoutLocked` / `// @layoutLocked false`
+  block annotation. **The layout is now locked by default** (absence of the
+  annotation means locked), so tables are packed and cannot be dragged; only a
+  deliberate Unlock (persisted as `false`) allows moving tables, and while
+  unlocked the drag tracks the cursor correctly (grab-point fix: `sx/sy` were
+  never initialised, so the first pointermove warped the table to the bottom-
+  right corner of the canvas).
+- **Escaping focus mode is deliberate.** Clicking the background no longer exits
+  focus mode — only Escape, or unfocusing every table via middle-click / the
+  dropdown `✕` does.
+- **Toolbar reordered + clickable zoom.** The readout now sits between the zoom
+  buttons as `− 100% + ⊡ ◎ ▾`. Clicking the percentage opens a small preset
+  menu (25…400%, plus the current level) that zooms keeping the canvas centre
+  fixed; it closes on outside click or Escape.
+- **Locked layout pans from tables.** With the layout locked (the default) a
+  left-drag over a table now pans the canvas instead of doing nothing, and the
+  cursor over tables shows the grab (pan) icon — `move` only when unlocked.
+  The canvas toggles a `dbml-locked` class to pick the cursor.
+- **Right-click also jumps the caret.** Right-clicking a table header/property
+  still watches/reveals it in the GUI **and** moves the editor caret to that
+  block (column included when a row was clicked), working from focus mode too.
+- **Breadcrumb over the editor.** A `▸ tabla · columna` bar now VISIBLY sits
+  above the DBML editor: the code panel is a flex column (crumb first in the
+  DOM, editor flexes below), fed on *every* caret movement (click, arrows,
+  `selectionchange` fired both on the document and the textarea), plus the live
+  column underline — not only when editing. `.erd-window-crumb`.
+- **Reveal robustness.** `fitToTable` retries once on the next animation frame
+  when the canvas has no size yet, so the live caret reveal is not lost right
+  after a re-render.
+- **Polish.** The native modal `✕` (top-right) is removed — the "Close" button
+  already exits. SVG text is `user-select: none`, so left-click dragging in the
+  GUI never highlights text. Primary-key properties no longer show the 🔑 emoji:
+  the property name is just bold + underlined. Foreign-key properties replace
+  the 🔗 emoji with a small stroke-drawn chain-link icon (`dbml-icon-link`).
+- **Last arrow used is highlighted.** Whenever you travel/watch via an edge
+  (right-click an arrow, a reference badge, or a row of the reference list) the
+  arrow you followed gets a `dbml-edge.live` accent until the next watch
+  (`Diagram.watchEdge` + `watchedEdgeKey`, cleared by every `revealTable`).
+- **Sensible jump-to-code selection.** A tiny per-line DBML parser
+  (`parsePropLine`/`locPropLine`) now dissects class vs property vs type vs
+  bracket content, so the selection is exact — **three patterns**, chosen by
+  where you click in the GUI:
+  - **Class name** — the word that follows `Table` (settings tolerated between
+    the name and the brace: `Table Companies [headercolor: #607D8B] {`).
+  - **Property name** — click on the property name row → only the first word
+    (`  nombre`), found inside that table's `{ … }` block (search *below* the
+    declared table, never crossing into a later table).
+  - **Property type** — click on the type text (`.dbml-type`) in the GUI → only
+    the type span `UUID`, `VARCHAR(255)`… (single or multi-word, up to the last
+    non-space word before ` [` or end of line).
+  - **Attrs/note** — parsed (bracket content extracted) for future use.
+- **Zoom on watch = 100% centred, min-fit fallback.** Right-clicking a class
+  now drops all margins/context: the class is placed exactly at the canvas
+  centre with zoom 100%; only if it cannot fit at 100% does the zoom drop to the
+  minimum that fits it completely.
+- **Breadcrumb = live reverse pattern.** The crumb no longer relies on the old
+  whole-block search (which failed on settings between `Table` and `{`): it
+  parses the line under the cursor from left to right, the same three patterns —
+  line starting with `Table` ⇒ the class name is the word after it; otherwise
+  the first word is the property name; and when the caret sits on the property's
+  TYPE the crumb shows `clase · propiedad · tipo`.
+- **Removed radial & organic layouts.** `LAYOUT_KINDS` is now only
+  `layered-lr`/`layered-tb`; `radialNodes`/`stressNodes` and their i18n keys are
+  deleted.
+- **New i18n keys:** `lockLayout`, `unlockLayout`, `searchTable`, `noResults`,
+  `focusedTables`, `allTables`, `addToFocus`, `removeFromFocus`, `zoomPick`,
+  `crumbIdle`; removed `radial`, `organic` (en + es).
+
 ## Files changed vs upstream
 
 | File | Change |
@@ -259,8 +360,14 @@ memory of the runtime state:
 | `src/parser.ts` | **`LayoutKind`/`LAYOUT_KINDS`/`parseLayout`/`layoutLine` for the `// @layout` annotation** |
 | `src/layout.ts` | **`computeLayout(model, kind)`, `LayoutResult.routes`, custom `radialNodes` (circular ring) + `stressNodes` (organic), layered direction from kind** |
 | `src/i18n.ts` | new keys: `refOutBadge`, `refInBadge`, `refHeadingOut/In`, `refHint`, `refNoRefs`, `focusOn`, `showAll`, `exitFocus`, `windowOpen`, `windowTitle`, `windowCode`, `windowSave`, `windowSaved`, `windowSaveError`, `windowCopy`, `windowCopied`, `windowCopyError`, `windowExit` (en + es); **+ `layout`, `layered-lr`, `layered-tb`, `radial`, `organic`, `settingsLayout`, `settingsLayoutDesc`, `navPrev`, `navNext`, `navFitWatched`, `renameTitle`, `renameBody`, `renameApply` (en + es)** |
-| `styles.css` | toolbar → bottom-left; `.focus-exit` button; `.dbml-focus-label`; `.dbml-node-focus` outline; `.dbml-ref-badge*` pills; `.dbml-refpanel*` list; `.erd-window*` overlay, editor textarea, resizable split, hidden split; removed `:fullscreen` rules; **`.dbml-node-live`, `.dbml-row-live`, `.dbml-zoom-pct`, `.dbml-nav-prev` (select + buttons)** |
+| `styles.css` | toolbar → bottom-left; `.focus-exit` button; `.dbml-focus-label`; `.dbml-node-focus` outline; `.dbml-ref-badge*` pills; `.dbml-refpanel*` list; `.erd-window*` overlay, editor textarea (flex column so the breadcrumb bar is visible), resizable split, hidden split; removed `:fullscreen` rules; **`.dbml-node-live`, `.dbml-row-live`, `.dbml-zoom-pct`, `.dbml-nav-prev` (select + buttons), `.dbml-edge.live`, `.erd-window-crumb`, `.dbml-col.pk` underline, `.dbml-icon-link`, modal `✕` hidden, SVG `user-select: none`** |
 | `main.js` | rebuilt via `npm run build` after the source edits |
+| **`src/main.ts` (v9)** | unified pointer scheme (left=move/pan, right=watch, middle=focus); **dropdown (▾)** with search/`✕`/`+` (`openDropdown`/`refreshDropdown`/`addDdRow`/`toggleFocusTable`), replaces `◀/▶` + select + focus label; **multi-table focus set** (`focusPair` additive, `toggleFocusTable`); background click no longer exits focus mode (Escape/`✕` only); **per-column ref badges** in the column rows; **single-ref badge direct action + ref-panel fallback** (`handleBadgeClick`, `openRefPanel` with column filter, `elemCol`/`elemBadge`/`badgeRefs`/`badgeTables`/`badgeLabel`); `drawEdge` arrow tooltip (`title`) + click pan/right-watch/middle-focus both; **double-click → jump to editor** (`onJump`); **layout lock default ON** (`// @layoutLocked false` persists unlock; `setLayoutLocked`, lock button in `ErdWindowModal`, annotation regexes include it, `renderBlock` passes it); **locked layout pans from tables** (`letPan` in `enableDrag`, `dbml-locked` canvas class + grab cursor); **drag grab-point fix** (`sx/sy` in `enableDrag`); **right-click watch + caret jump**; **toolbar `− 100% +` + clickable zoom preset menu** (`toggleZoomMenu`/`setZoomPct`/`.dbml-zoom-menu`); **editor breadcrumb** (`updateCrumb`/`.erd-window-crumb` + `selectionchange` on doc & textarea); **last-arrow highlight** (`watchEdge`/`watchedEdgeKey`, `dbml-edge.live`); **3-pattern jump selection** (`parsePropLine`/`locPropLine` + `.dbml-type` click target): class name word / property name only / property type span, setting-aware `Table` line, block-scoped col search; **fitToTable = 100% centred, min-fit fallback** (no margins); **reverse-pattern breadcrumb** (`tableAtCaret` line parse: class / prop / prop·type, `CaretHit`); **FK chain-link icon, PK bold+underline, removed native modal `✕`**; `fitToTable` rAF retry for live reveal; removed edge-editing methods (no-ops left) |
+| **`src/parser.ts` (v9)** | `LAYOUT_KINDS` → only `layered-lr`/`layered-tb`; **`parseLayoutLocked`/`layoutLockLine` (absence = locked; explicit `false` value)** |
+| **`src/layout.ts` (v9)** | removed `radialNodes`/`stressNodes` (only layered ELK path remains) |
+| **`src/i18n.ts` (v9)** | **+ `lockLayout`, `unlockLayout`, `searchTable`, `noResults`, `focusedTables`, `allTables`, `addToFocus`, `removeFromFocus`, `zoomPick`; − `radial`, `organic`** (en + es) |
+| **`styles.css` (v9)** | **`.dbml-dd*` dropdown (sticky search, rows, sections, empty); `.dbml-zoom-pct` button + `.dbml-zoom-menu*`; `.erd-window-lock`** |
+| **`main.js` (v9)** | rebuilt via `npm run build` after the source edits |
 
 Everything else remains as upstream 0.1.21 (`manifest.json`, `versions.json`).
 

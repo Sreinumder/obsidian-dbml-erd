@@ -19,7 +19,8 @@
   background-size: 22px 22px;
   cursor: grab;
 }
-.dbml-erd-canvas.panning {
+.dbml-erd-canvas.panning,
+.dbml-erd-canvas.panning .dbml-node {
   cursor: grabbing;
 }
 
@@ -28,11 +29,22 @@
   inset: 0;
   width: 100%;
   height: 100%;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.dbml-erd-svg * {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* tablas */
 .dbml-node {
   cursor: move;
+}
+/* layout bloqueado (default): sobre las tablas el cursor es de pan, igual que
+   en el fondo */
+.dbml-erd-canvas.dbml-locked .dbml-node {
+  cursor: grab;
 }
 .dbml-body {
   fill: var(--background-secondary);
@@ -61,6 +73,8 @@
 }
 .dbml-col.pk {
   font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 .dbml-type {
   fill: var(--text-muted);
@@ -69,6 +83,12 @@
 }
 .dbml-icon {
   font-size: 11px;
+}
+/* icono de eslabón/enlace para propiedades referenciadas (FK) */
+.dbml-icon-link {
+  stroke: var(--text-muted);
+  fill: none;
+  stroke-width: 1.4;
 }
 .dbml-badge {
   fill: var(--background-modifier-border);
@@ -93,6 +113,12 @@
 }
 .dbml-edge.custom {
   stroke-dasharray: none;
+}
+/* última arista usada para vigilar/emigrar (watch): resaltada */
+.dbml-edge.live {
+  stroke: var(--interactive-accent);
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--interactive-accent) 55%, transparent));
 }
 /* path invisible y ancho para tocar/arrastrar la arista (sobre todo en táctil) */
 .dbml-edge-hit {
@@ -182,15 +208,144 @@
   color: var(--text-normal);
 }
 
-/* porcentaje de zoom en la barra (escala de la letra) */
+/* porcentaje de zoom en la barra (escala de la letra): clicable, abre el menú
+   de zooms estándar */
 .dbml-zoom-pct {
-  align-self: center;
-  min-width: 42px;
-  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 46px;
+  height: 30px;
+  padding: 0 6px;
+  box-sizing: border-box;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  color: var(--text-muted);
+  cursor: pointer;
   user-select: none;
+}
+.dbml-zoom-pct:hover {
+  border-color: var(--interactive-accent);
+}
+
+/* menú de zooms estándar (aparece al hacer clic en el porcentaje) */
+.dbml-zoom-menu {
+  position: absolute;
+  bottom: 48px;
+  left: 12px;
+  z-index: 6;
+  width: 110px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+  padding: 4px;
+}
+.dbml-zoom-menu-item {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  text-align: right;
+}
+.dbml-zoom-menu-item:hover {
+  background: var(--background-modifier-hover);
+}
+.dbml-zoom-menu-item.active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-weight: 700;
+}
+
+/* dropdown de búsqueda de tablas (sustituye al select de la barra) */
+.dbml-dd {
+  position: absolute;
+  bottom: 48px;
+  left: 12px;
+  z-index: 6;
+  width: 260px;
+  max-height: 60%;
+  overflow: auto;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+  padding-bottom: 6px;
+}
+.dbml-dd-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: block;
+  width: calc(100% - 16px);
+  margin: 8px;
+  padding: 6px 8px;
+  box-sizing: border-box;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 12px;
+}
+.dbml-dd-section {
+  display: block;
+  margin: 4px 8px 2px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  user-select: none;
+}
+.dbml-dd-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 4px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.dbml-dd-row:hover {
+  background: var(--background-modifier-hover);
+}
+.dbml-dd-row.watched {
+  outline: 1px solid var(--text-accent);
+  outline-offset: -1px;
+}
+.dbml-dd-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.dbml-dd-act {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  padding: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 5px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 12px;
+  cursor: pointer;
+}
+.dbml-dd-row.focused .dbml-dd-name {
+  color: var(--text-accent);
+}
+.dbml-dd-empty {
+  margin: 8px;
+  font-size: 12px;
+  text-align: center;
+  color: var(--text-muted);
 }
 
 /* navegador de tablas del toolbar: ◀ <select> ▶ */
@@ -330,6 +485,10 @@
 .erd-window-container.modal-container {
   z-index: 100;
 }
+/* el botón ✕ nativo del modal no aporta nada: ya existe el botón Cerrar */
+.erd-window-container .modal-close-button {
+  display: none;
+}
 .erd-window.modal {
   width: 100%;
   height: 100%;
@@ -390,6 +549,11 @@
   background: var(--interactive-accent);
   color: var(--text-on-accent);
 }
+/* candado del layout (bloquea el arrastre de tablas) */
+.erd-window-lock {
+  font-size: 14px;
+  padding: 4px 10px;
+}
 .erd-window-body {
   flex: 1;
   display: flex;
@@ -422,6 +586,8 @@
   flex: none;
   width: 42%;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
   border-left: 1px solid var(--background-modifier-border);
   background: var(--background-secondary);
   transition: width 0.15s ease;
@@ -430,9 +596,24 @@
   width: 0 !important;
   border-left: none;
 }
+/* miga de pan: tabla · columna bajo el cursor, encima del editor */
+.erd-window-crumb {
+  flex: none;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-accent);
+  background: var(--background-primary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
 .erd-window-editor {
+  flex: 1;
+  min-height: 0;
   width: 100%;
-  height: 100%;
   resize: none;
   border: none;
   outline: none;

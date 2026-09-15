@@ -522,14 +522,9 @@ export function setRefOpInBlock(
 
 // Sistemas de layout disponibles (elegibles desde el desplegable y persistidos
 // por bloque como `// @layout <kind>`).
-export type LayoutKind = "layered-lr" | "layered-tb" | "radial" | "organic";
+export type LayoutKind = "layered-lr" | "layered-tb";
 
-export const LAYOUT_KINDS: LayoutKind[] = [
-  "layered-lr",
-  "layered-tb",
-  "radial",
-  "organic",
-];
+export const LAYOUT_KINDS: LayoutKind[] = ["layered-lr", "layered-tb"];
 
 export function parseLayout(src: string): LayoutKind | undefined {
   const m = src.match(/\/\/\s*@layout\s+([A-Za-z0-9_-]+)/);
@@ -540,6 +535,19 @@ export function parseLayout(src: string): LayoutKind | undefined {
 
 export function layoutLine(kind: LayoutKind): string {
   return `// @layout ${kind}`;
+}
+
+// El layout nace BLOQUEADO (default seguro para "ver sin editar"). La anotación
+// `// @layoutLocked` fija el estado explícito; `// @layoutLocked false` lo
+// desbloquea (se persiste solo al desbloquear; su ausencia = bloqueado).
+export function parseLayoutLocked(src: string): boolean {
+  const m = src.match(/\/\/\s*@layoutLocked\b\s*(true|false)?\b/i);
+  if (!m) return true;
+  return m[1] ? m[1].toLowerCase() === "true" : true;
+}
+
+export function layoutLockLine(locked: boolean): string {
+  return locked ? `// @layoutLocked` : `// @layoutLocked false`;
 }
 
 export function parsePositions(

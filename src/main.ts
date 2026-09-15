@@ -14,6 +14,7 @@ import { t, setLang, Lang, LANGS } from "./i18n";
 import {
   parseDBML,
   Model,
+  Table,
   Ref,
   setRefOpInBlock,
   parsePositions,
@@ -23,7 +24,9 @@ import {
   LayoutKind,
   LAYOUT_KINDS,
   parseLayout,
+  parseLayoutLocked,
   layoutLine,
+  layoutLockLine,
 } from "./parser";
 import {
   computeLayout,
@@ -115,7 +118,7 @@ export default class DbmlErdPlugin extends Plugin {
       kind +
       "\n" +
       source
-        .replace(/^[ \t]*\/\/[ \t]*@(pos|view|size|edge|layout)\b.*$/gm, "")
+        .replace(/^[ \t]*\/\/[ \t]*@(pos|view|size|edge|layout|layoutLocked)\b.*$/gm, "")
         .trim()
     );
   }
@@ -188,6 +191,7 @@ export default class DbmlErdPlugin extends Plugin {
           size: size ?? undefined,
           savedEdges,
           layout: kind,
+          layoutLocked: parseLayoutLocked(source),
         })
       );
     } catch (e) {
@@ -238,12 +242,11 @@ class Diagram extends MarkdownRenderChild {
   private focus: Set<string> | null = null;
   private refPanel?: HTMLElement;
   private refPanelCleanup?: () => void;
-  private focusBtn?: HTMLButtonElement;
-  private focusLabel?: HTMLElement;
   // salto a la posición del código (overlay): click derecho en tabla/columna.
   private onJump?: (
     table: string,
-    col: string | null
+    col: string | null,
+    part: "class" | "name" | "type"
   ) => void;
   // en modo enfoque las tablas se re-dispersan en una fila compacta (se ignora
   // la posición/orientación original); este mapa se descarta al salir.
@@ -253,22 +256,26 @@ class Diagram extends MarkdownRenderChild {
   > | null = null;
 
   // sistema de layout activo y quién rutea las aristas: ELK ("elk", jerárquico)
-  // o el router ortogonal propio ("manhattan", radial/organic).
+  // o el router ortogonal propio ("manhattan").
   private layoutKind: LayoutKind;
   private routingMode: "elk" | "manhattan";
   // tabla "vigilada" del modo normal: se resalta (.dbml-node-live) y concentra
   // la vista sin ocultar el resto (a diferencia del modo enfoque/exploración).
   private watchedTable: string | null = null;
-  // navegador del toolbar (modo normal): anterior/siguiente + select de tablas.
-  private navPrev?: HTMLButtonElement;
-  private navNext?: HTMLButtonElement;
-  private navSelect?: HTMLSelectElement;
-  private navGroup?: HTMLElement;
+  // última arista usada para vigilar/emigrar una tabla (resaltada).
+  private watchedEdgeKey: string | null = null;
   // porcentaje de zoom visible en la barra (k*100 ⇒ tamaño de letra relativo).
   private zoomPct?: HTMLElement;
   // columna subrayada en vivo sobre la tabla vigilada (índice de fila).
   private liveRow: { table: string; idx: number } | null = null;
   private liveRowEl?: SVGRectElement;
+  // layout locked: impide el arrastre de tablas/aristas.
+  private layoutLocked = true;
+  // dropdown panel (buscador + tabla de tablas enfocadas/todas)
+  private dropdownPanel?: HTMLElement;
+  private dropdownBtn?: HTMLButtonElement;
+  // menú de zooms estándar (al hacer clic en el porcentaje de la barra)
+  private zoomMenu?: HTMLElement;
 
   constructor(
     parent: HTMLElement,
@@ -286,10 +293,12 @@ class Diagram extends MarkdownRenderChild {
       // true = montado dentro de la ventana/overlay (ErdWindowModal): sin
       // botón ⤢ y sin handler de Escape del bloque (lo gestiona el Modal).
       window?: boolean;
-      // click derecho en tabla/columna: salta a esa posición en el editor.
-      onJump?: (table: string, col: string | null) => void;
+      // click derecho en tabla/columna: salta a esa posición en el editor (doble clic).
+      onJump?: (table: string, col: string | null, part: "class" | "name" | "type") => void;
       // sistema de layout (default plugins.settings.layout si no se pasa).
       layout?: LayoutKind;
+      // layout locked: impide el arrastre de tablas/aristas.
+      layoutLocked?: boolean;
     }
   ) {
     super(parent);
@@ -298,6 +307,7 @@ class Diagram extends MarkdownRenderChild {
     this.elkEdges = layout.edges.map((e) => e.pts);
     this.layoutKind = opts?.layout ?? "layered-lr";
     this.routingMode = layout.routes;
+    this.layoutLocked = opts?.layoutLocked ?? true;
     this.plugin = opts?.plugin;
     this.ctx = opts?.ctx;
     this.blockEl = opts?.el;
@@ -330,9 +340,6 @@ class Diagram extends MarkdownRenderChild {
     if (this.ctx && this.blockEl) {
       const info = this.ctx.getSectionInfo(this.blockEl);
       this.selKey = `${this.ctx.sourcePath}#${info ? info.lineStart : 0}`;
-      const prev = this.plugin?.selByBlock.get(this.selKey);
-      if (prev && this.model.refs.some((r) => this.edgeKey(r) === prev))
-        this._selectedEdge = prev;
       // restaura el modo enfoque sobreviviendo al re-render (vault.process)
       const savedFocus = this.plugin?.focusState.get(this.selKey);
       if (savedFocus && savedFocus.length) {
@@ -343,6 +350,8 @@ class Diagram extends MarkdownRenderChild {
 
     const host = parent.createDiv({ cls: "dbml-erd-canvas" });
     this.hostEl = host;
+    // cursor de pan sobre las tablas cuando el layout está bloqueado
+    host.classList.toggle("dbml-locked", this.layoutLocked);
     if (opts?.height)
       host.style.setProperty("--dbml-erd-height", opts.height + "px");
     // tamaño guardado (override del default CSS / --dbml-erd-height)
@@ -366,8 +375,16 @@ class Diagram extends MarkdownRenderChild {
     // toolbar (esquina inferior izquierda: la superior derecha corresponde al
     // botón nativo "Edit this block" de Obsidian, que debe quedar accesible).
     const bar = host.createDiv({ cls: "dbml-erd-toolbar" });
-    this.btn(bar, "+", () => this.zoom(1.15));
     this.btn(bar, "−", () => this.zoom(0.87));
+    const zp = bar.createSpan({ cls: "dbml-zoom-pct", text: "100%" });
+    this.zoomPct = zp;
+    // clic en el porcentaje: menú desplegable con zooms estándar
+    zp.title = t("zoomPick");
+    this.registerDomEvent(zp, "click", (ev) => {
+      ev.stopPropagation();
+      this.toggleZoomMenu();
+    });
+    this.btn(bar, "+", () => this.zoom(1.15));
     this.btn(bar, "⊡", () => this.fitAll());
     // encuadra SOLO la tabla vigilada (con margen, dejando visible su entorno)
     const fitW = bar.createEl("button", { text: "◎" });
@@ -375,56 +392,31 @@ class Diagram extends MarkdownRenderChild {
     this.registerDomEvent(fitW, "click", () => {
       if (this.watchedTable) this.revealTable(this.watchedTable, true);
     });
-    const zp = bar.createSpan({ cls: "dbml-zoom-pct", text: "100%" });
-    this.zoomPct = zp;
 
-    // navegador de tablas (◀ select ▶): solo en modo normal.
-    const nav = bar.createDiv({ cls: "dbml-nav-prev" });
-    nav.style.display = "none";
-    this.navGroup = nav;
-    const prev = nav.createEl("button", { text: "◀" });
-    prev.title = t("navPrev");
-    this.navPrev = prev;
-    this.registerDomEvent(prev, "click", () => this.stepTable(-1));
-    const sel = nav.createEl("select", { cls: "dbml-nav-select" }) as HTMLSelectElement;
-    this.navSelect = sel;
-    for (const name of this.model.tables
-      .map((x) => x.name)
-      .sort((a, b) => a.localeCompare(b)))
-      sel.append(sel.createEl("option", { value: name, text: name }));
-    sel.addEventListener("change", () => {
-      if (sel.value && this.pos[sel.value]) this.revealTable(sel.value, true);
+    // dropdown de tablas (en lugar del navegador select): buscador + secciones
+    // "Enfocadas" y "Todas". Reemplaza al select de la barra y a la etiqueta
+    // de enfoque; siempre visible (en modo normal y en modo enfoque).
+    const ddBtn = bar.createEl("button", { text: "▾" });
+    ddBtn.title = t("searchTable");
+    this.dropdownBtn = ddBtn;
+    this.registerDomEvent(ddBtn, "click", (ev) => {
+      ev.stopPropagation();
+      this.toggleDropdown();
     });
-    const next = nav.createEl("button", { text: "▶" });
-    next.title = t("navNext");
-    this.navNext = next;
-    this.registerDomEvent(next, "click", () => this.stepTable(1));
+    const panel = host.createDiv({ cls: "dbml-dd" });
+    panel.style.display = "none";
+    this.dropdownPanel = panel;
 
-    const fb = bar.createEl("button", { text: "✕" });
-    fb.classList.add("focus-exit");
-    fb.title = t("exitFocus");
-    fb.style.display = "none";
-    this.focusBtn = fb;
-    this.registerDomEvent(fb, "click", () => this.exitFocus());
-    // etiqueta de la tabla(s) enfocada(s) actualmente, p.ej. "<Warehouses>".
-    // Solo se muestra en modo enfoque/exploración (en modo normal lo hace el
-    // <select> del navegador).
-    const fl = bar.createSpan({ cls: "dbml-focus-label" });
-    fl.style.display = "none";
-    this.focusLabel = fl;
     // apertura en ventana/overlay a pantalla completa (fuera del code block)
     if (!opts?.window) {
       const win = bar.createEl("button", { text: "⤢" });
       win.title = t("windowOpen");
       this.registerDomEvent(win, "click", () => void this.openWindow());
     }
-    // si se restauró el modo enfoque al montar, el ✕ y la etiqueta del toolbar
-    // (creados antes de ese restore) deben reflejar el estado actual
     this.updateFocusUI();
 
     this.drawNodes();
     this.redrawEdges();
-    this.redrawHandles(); // muestra handles si se restauró una selección
     this.bindPanZoom(host);
     this.bindResize(host);
     // el plugin abre sus propios menús (tabla/columna/arista): el contextmenu
@@ -437,12 +429,39 @@ class Diagram extends MarkdownRenderChild {
     this.applyView();
     // si no hay vista guardada, encuadrar tras montar (necesita medidas del host)
     if (!opts?.view) activeWindow.requestAnimationFrame(() => this.fit());
-    // Esc: cierra el panel de referencias o sale del modo enfoque (salvo que
-    // haya un menú/modal abierto, que gestiona su propia tecla Escape). En el
-    // overlay (opts.window) la tecla Escape la gestiona el propio Modal.
+    // cierre del dropdown/menú de zoom al hacer clic fuera (captura: aunque el
+    // clic esté en el SVG/toolbar, se cierran antes de que esos handlers hagan
+    // otra cosa).
+    this.registerDomEvent(
+      activeDocument,
+      "pointerdown",
+      (e: PointerEvent) => {
+        const tgt = e.target as Element;
+        if (this.zoomMenu && this.zoomMenu.style.display === "block") {
+          if (!tgt.closest?.(".dbml-zoom-menu") && tgt !== this.zoomPct)
+            this.closeZoomMenu();
+        }
+        if (this.dropdownPanel?.style.display !== "block") return;
+        if (tgt.closest?.(".dbml-dd")) return;
+        if (tgt === this.dropdownBtn) return;
+        this.closeDropdown();
+      },
+      { capture: true }
+    );
+    // Esc: cierra el dropdown/panel de referencias o sale del modo enfoque
+    // (salvo que haya un menú/modal abierto, que gestiona su propia tecla
+    // Escape). En el overlay (opts.window) la tecla Escape la gestiona el Modal.
     if (!opts?.window) {
       this.registerDomEvent(activeWindow, "keydown", (e: KeyboardEvent) => {
         if (e.key !== "Escape") return;
+        if (this.zoomMenu && this.zoomMenu.style.display === "block") {
+          this.closeZoomMenu();
+          return;
+        }
+        if (this.dropdownPanel && this.dropdownPanel.style.display === "block") {
+          this.closeDropdown();
+          return;
+        }
         if (this.refPanel) {
           this.closeRefPanel();
           return;
@@ -729,8 +748,6 @@ class Diagram extends MarkdownRenderChild {
     if (custom && custom.length) return this.routeWithWaypoints(r, custom);
     // en modo enfoque las tablas se re-dispersaron (layoutPos): la ruta ELK
     // original queda desposicionada, así que se re-rutea manhattan siempre.
-    // Igual en layouts no jerárquicos (radial/organic): las posiciones ELK
-    // originales proceden de otro sistema, no valen.
     if (
       this.routingMode === "manhattan" ||
       this.layoutPos ||
@@ -874,15 +891,20 @@ class Diagram extends MarkdownRenderChild {
     const path = activeDocument.createElementNS(NS, "path");
     path.setAttribute("d", d);
     path.classList.add("dbml-edge");
-    if (this.selectedEdge === key) path.classList.add("selected");
     if (this.customEdges[key]) path.classList.add("custom");
+    if (key === this.watchedEdgeKey) path.classList.add("live");
     this.edgeLayer.appendChild(path);
-    // path "hit" invisible y ancho para tocar/arrastrar con el dedo
+    // path "hit" invisible y ancho para tocar con el dedo; lleva el tooltip
+    // (qué tabla y qué propiedad de la otra tabla referencia) y el ratón.
     const hit = activeDocument.createElementNS(NS, "path") as SVGElement;
     hit.setAttribute("d", d);
     hit.classList.add("dbml-edge-hit");
+    if (key === this.watchedEdgeKey) hit.classList.add("live");
+    const tt = activeDocument.createElementNS(NS, "title");
+    tt.textContent = `${r.from}.${r.fromCol} → ${r.to}.${r.toCol}`;
+    hit.appendChild(tt);
     this.edgeLayer.appendChild(hit);
-    this.enableEdgeSelect(hit, r, key);
+    this.enableEdgeSelect(hit, r);
     const s = pts[0];
     const e = pts[pts.length - 1];
     const fromMany = r.op === ">" || r.op === "<>";
@@ -903,12 +925,16 @@ class Diagram extends MarkdownRenderChild {
     this.redrawHandles();
   }
 
-  // tap en la línea: 1er toque selecciona (muestra handles); 2º abre menú.
-  private enableEdgeSelect(hit: SVGElement, r: Ref, key: string) {
+  // clic en una arista (sin edición de ruta):
+//  izdo  = no hace nada (el pan lo gestiona bindPanZoom)
+//  dcho  = vigilar la "otra" tabla (la que no está vigilada)
+//  medio = enfocar ambas tablas conectadas
+  private enableEdgeSelect(hit: SVGElement, r: Ref) {
     let sx = 0,
       sy = 0,
       moved = false;
     hit.addEventListener("pointerdown", (ev: PointerEvent) => {
+      if (ev.button === 0) return; // clic izquierdo: pan normal
       ev.stopPropagation();
       ev.preventDefault();
       sx = ev.clientX;
@@ -934,12 +960,15 @@ class Diagram extends MarkdownRenderChild {
         }
         if (moved || e.type === "pointercancel") return;
         e.stopPropagation();
-        if (this.selectedEdge === key) {
-          const ev2 = e;
-          setTimeout(() => this.openEdgeMenu(r, key, ev2), 0);
-        } else {
-          this.selectedEdge = key;
-          this.refresh();
+        e.preventDefault();
+        if (e.button === 1) {
+          // clic medio: enfocar la tabla (origen) + la referenciada (destino)
+          this.focusPair(r.from, r.to);
+        } else if (e.button === 2) {
+          // clic derecho: vigilar la tabla que no está vigilada
+          const other = this.watchedTable === r.from ? r.to : r.from;
+          this.revealTable(other, true);
+          this.watchEdge(this.edgeKey(r));
         }
       };
       hit.addEventListener("pointermove", mv);
@@ -1190,23 +1219,213 @@ class Diagram extends MarkdownRenderChild {
   }
 
   private updateFocusUI() {
-    if (!this.focusBtn) return;
-    const active = !!this.focus && this.focus.size > 0;
-    this.focusBtn.style.display = active ? "" : "none";
-    if (this.navGroup) this.navGroup.style.display = active ? "none" : "";
-    if (this.focusLabel) {
-      if (active) {
-        const names = this.model.tables
-          .filter((x) => this.focus!.has(x.name))
-          .map((x) => x.name);
-        this.focusLabel.textContent = names.length ? `<${names.join(" + ")}>` : "";
-        this.focusLabel.style.display = names.length ? "" : "none";
-      } else {
-        // en modo normal la tabla vigilada la muestra el <select> del navegador
-        this.focusLabel.style.display = "none";
-      }
+    // el dropdown refleja el estado de enfoque actual (si está abierto)
+    if (this.dropdownPanel && this.dropdownPanel.style.display === "block")
+      this.refreshDropdown(this.ddSearchValue());
+  }
+
+  private ddSearchValue(): string {
+    return this.dropdownPanel?.querySelector<HTMLInputElement>(".dbml-dd-search")
+      ?.value ?? "";
+  }
+
+  private toggleDropdown() {
+    if (this.dropdownPanel?.style.display === "block") this.closeDropdown();
+    else this.openDropdown();
+  }
+
+  private openDropdown() {
+    if (!this.dropdownPanel) return;
+    this.refreshDropdown("");
+    this.dropdownPanel.style.display = "block";
+    const beforeFocus = this.watchedTable;
+    const input = this.dropdownPanel.querySelector<HTMLInputElement>(
+      ".dbml-dd-search"
+    );
+    if (input) input.focus();
+    if (beforeFocus) {
+      // marca visualmente la fila vigilada
+      this.dropdownPanel
+        .querySelectorAll(".dbml-dd-row")
+        .forEach((r) => r.classList.remove("watched"));
+      const row = this.dropdownPanel.querySelector<HTMLElement>(
+        `[data-table="${CSS.escape(beforeFocus)}"]`
+      );
+      if (row) row.classList.add("watched");
     }
-    if (this.navSelect) this.navSelect.value = this.watchedTable ?? "";
+  }
+
+  private closeDropdown() {
+    if (this.dropdownPanel) this.dropdownPanel.style.display = "none";
+  }
+
+  // ---- menú de zooms estándar (clic en el porcentaje de la barra) ----
+  private toggleZoomMenu() {
+    if (this.zoomMenu?.style.display === "block") this.closeZoomMenu();
+    else this.openZoomMenu();
+  }
+
+  private openZoomMenu() {
+    if (!this.hostEl || !this.zoomPct) return;
+    this.closeZoomMenu();
+    const menu = this.hostEl.createDiv({ cls: "dbml-zoom-menu" });
+    this.zoomMenu = menu;
+    const levels = [25, 50, 75, 90, 100, 125, 150, 200, 300, 400];
+    const cur = Math.round(this.view.k * 100);
+    for (const p of levels) {
+      const it = menu.createDiv({ cls: "dbml-zoom-menu-item" });
+      it.textContent = p + "%";
+      if (p === cur) it.classList.add("active");
+      it.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.setZoomPct(p);
+      });
+    }
+    menu.style.display = "block";
+  }
+
+  private closeZoomMenu() {
+    this.zoomMenu?.remove();
+    this.zoomMenu = undefined;
+  }
+
+  // zoom a un porcentaje estándar manteniendo el centro del lienzo fijo.
+  private setZoomPct(pct: number) {
+    const r = this.hostEl?.getBoundingClientRect();
+    if (r && r.width > 0) {
+      const f = pct / 100 / this.view.k;
+      const cx = r.width / 2;
+      const cy = r.height / 2;
+      this.view.x = cx - (cx - this.view.x) * f;
+      this.view.y = cy - (cy - this.view.y) * f;
+      this.view.k *= f;
+    } else {
+      this.view.k = pct / 100;
+    }
+    this.applyView();
+    this.scheduleSaveLayout();
+    this.closeZoomMenu();
+  }
+
+  // reconstruye el contenido del dropdown (buscador + secciones según `q`).
+  private refreshDropdown(q: string) {
+    if (!this.dropdownPanel) return;
+    this.dropdownPanel.empty();
+    const query = q.trim().toLowerCase();
+
+    const search = this.dropdownPanel.createEl("input", {
+      cls: "dbml-dd-search",
+    });
+    search.placeholder = t("searchTable");
+    search.value = q;
+    search.addEventListener("input", () =>
+      this.refreshDropdown(search.value)
+    );
+    search.addEventListener("click", (e) => e.stopPropagation());
+
+    const focused = this.focus
+      ? this.model.tables.filter((x) => this.focus!.has(x.name))
+      : [];
+    // las enfocadas se listan solo sin búsqueda activa
+    const showFocused = !query && focused.length > 0;
+    if (showFocused) {
+      this.dropdownPanel.createDiv({
+        cls: "dbml-dd-section",
+        text: t("focusedTables"),
+      });
+      focused.forEach((x) => this.addDdRow(x, true, search));
+    }
+    const others = this.model.tables.filter(
+      (x) => !focused.includes(x)
+    );
+    const rest = others.filter((x) => x.name.toLowerCase().includes(query));
+    if (!query || rest.length) {
+      this.dropdownPanel.createDiv({
+        cls: "dbml-dd-section",
+        text: t("allTables"),
+      });
+      rest.slice(0, 60).forEach((x) => this.addDdRow(x, false, search));
+    }
+    const total = (showFocused ? focused.length : 0) + rest.length;
+    if (!total) {
+      this.dropdownPanel.createDiv({
+        cls: "dbml-dd-empty",
+        text: t("noResults"),
+      });
+    }
+    // al reconstruir el panel en cada pulsación el input se destruye y se pierde
+    // el foco/caret: si el dropdown sigue abierto, restaurar ambos al final.
+    if (this.dropdownPanel.style.display === "block") {
+      search.focus();
+      search.setSelectionRange(search.value.length, search.value.length);
+    }
+  }
+
+  // una fila del dropdown: el nombre vigila la tabla; el botón ✕/+ alterna el
+  // enfoque; botón medio también alterna.
+  private addDdRow(
+    tbl: Table,
+    inFocus: boolean,
+    search: HTMLInputElement
+  ) {
+    if (!this.dropdownPanel) return;
+    const row = this.dropdownPanel.createDiv({
+      cls: "dbml-dd-row" + (inFocus ? " focused" : ""),
+    });
+    row.setAttribute("data-table", tbl.name);
+    if (this.watchedTable === tbl.name) row.classList.add("watched");
+    const label = row.createSpan({ cls: "dbml-dd-name", text: tbl.name });
+    label.title = tbl.name;
+    // click en la fila: vigilar la tabla (centrar + mostrar todo)
+    row.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.revealTable(tbl.name, true);
+      this.markDdWatched(tbl.name);
+    });
+    // botón medio: alternar el enfoque de la tabla
+    row.addEventListener("auxclick", (e) => {
+      if (e.button === 1) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.toggleFocusTable(tbl.name);
+        this.refreshDropdown(search.value);
+      }
+    });
+    const act = row.createEl("button", {
+      cls: "dbml-dd-act",
+      text: inFocus ? "✕" : "+",
+    });
+    act.title = inFocus ? t("removeFromFocus") : t("addToFocus");
+    act.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.toggleFocusTable(t.name);
+      this.refreshDropdown(search.value);
+    });
+  }
+
+  private markDdWatched(name: string) {
+    this.dropdownPanel
+      ?.querySelectorAll(".dbml-dd-row")
+      .forEach((r) => r.classList.toggle("watched", r.getAttribute("data-table") === name));
+  }
+
+  // añade la tabla al modo enfoque SIN reemplazar el conjunto existente (multi
+  // tabla); si ya está enfocada la quita (y si era la última, sale del modo).
+  private toggleFocusTable(name: string) {
+    if (this.focus && this.focus.has(name)) {
+      this.focus.delete(name);
+      if (this.focus.size === 0) {
+        this.fitAll(); // vuelve al modo normal
+        return;
+      }
+      this.saveFocusState();
+      this.applyFocusView();
+      return;
+    }
+    if (!this.focus) this.focus = new Set<string>();
+    this.focus.add(name);
+    this.saveFocusState();
+    this.applyFocusView();
   }
 
   // banda al navegador del toolbar: tabla anterior/siguiente (alfabético).
@@ -1233,16 +1452,18 @@ class Diagram extends MarkdownRenderChild {
     this.fit(true);
   }
 
-  // en el panel de referencias: clic izdo -> enfoca solo esa tabla.
+  // añade la tabla al modo enfoque SIN reemplazar el conjunto existente (multi
+  // tabla). Si ya está enfocada se quita; si era la última, sale del modo.
   private focusTable(name: string) {
-    this.focus = new Set([name]);
-    this.saveFocusState();
-    this.applyFocusView();
+    this.toggleFocusTable(name);
   }
 
-  // clic derecho: trae la tabla referenciada junto a la actual (ambas a cuadro).
+  // clic medio en arista/badge: trae la tabla referenciada junto a la actual
+  // (ambas a cuadro) sin descartar otras tablas ya enfocadas.
   private focusPair(a: string, b: string) {
-    this.focus = new Set([a, b]);
+    if (!this.focus) this.focus = new Set<string>();
+    this.focus.add(a);
+    this.focus.add(b);
     this.saveFocusState();
     this.applyFocusView();
   }
@@ -1287,6 +1508,7 @@ class Diagram extends MarkdownRenderChild {
   revealTable(name: string, fit = true) {
     if (!this.pos[name]) return;
     this.watchedTable = name;
+    this.watchedEdgeKey = null;
     this.markLiveRow(null, null);
     if (this.focus) {
       // en modo enfoque no aplica: se sale a la vista completa y se concentra.
@@ -1302,27 +1524,43 @@ class Diagram extends MarkdownRenderChild {
     if (fit) this.fitToTable(name);
   }
 
-  // vista centrada en la tabla vigilada: la encuadra CON margen alrededor para
-  // que se vea el contexto (tablas vecinas), sin ocultar el resto.
-  private fitToTable(name: string) {
+  // el candado del layout impide arrastrar las tablas (editores externos)
+  setLayoutLocked(locked: boolean) {
+    this.layoutLocked = locked;
+    this.hostEl?.classList.toggle("dbml-locked", locked);
+  }
+
+  // resalta la última arista usada para vigilar/emigrar a otra tabla.
+  watchEdge(key: string) {
+    this.watchedEdgeKey = key;
+    this.redrawEdges();
+  }
+
+  // vista centrada en la tabla vigilada SIN contexto alrededor: la clase se
+  // coloca en el centro exacto del lienzo con zoom 100%; si la tabla no cabe
+  // a ese zoom, se baja al mínimo que permite encajarla completa.
+  private fitToTable(name: string, retried = false) {
     const P = this.pos[name];
     const r = this.svg.getBoundingClientRect();
-    if (!P || r.width === 0) return;
+    if (!P) return;
+    if (r.width === 0 || r.height === 0) {
+      // recién montado, el lienzo aún no tiene tamaño: reintenta el encuadre en
+      // el siguiente frame (si no, el reveal en vivo se pierde tras el render).
+      if (!retried && this.svg.isConnected) {
+        requestAnimationFrame(() => this.fitToTable(name, true));
+      }
+      return;
+    }
     const t = this.model.tables.find((x) => x.name === name);
     const w = P.w || NODE_W;
     const h = P.h || HEAD_H + (t ? t.cols.length * ROW_H : 0);
-    // margen generoso: la tabla ocupa ~55% de la superficie para dejar ver el
-    // contenido que la rodea
-    const k = Math.min(
-      (r.width * 0.55) / w,
-      (r.height * 0.55) / h,
-      1.4
-    );
-    this.view.k = isFinite(k) && k > 0 ? k : 1;
-    const PX = (r.width - w * this.view.k) / 2;
-    const PY = (r.height - h * this.view.k) / 2;
-    this.view.x = PX - P.x * this.view.k;
-    this.view.y = PY - P.y * this.view.k;
+    // 100% si cabe; si no, el zoom mínimo para que la clase entre entera.
+    const k = isFinite(Math.min(1, r.width / w, r.height / h))
+      ? Math.min(1, r.width / w, r.height / h)
+      : 1;
+    this.view.k = k > 0 ? k : 0.25;
+    this.view.x = r.width / 2 - (P.x + w / 2) * this.view.k;
+    this.view.y = r.height / 2 - (P.y + h / 2) * this.view.k;
     this.applyView();
   }
 
@@ -1334,8 +1572,9 @@ class Diagram extends MarkdownRenderChild {
     return s.slice(0, Math.max(1, max - 1)) + "…";
   }
 
-  // contadores "→n" (salientes) y "←n" (entrantes) en la cabecera de la tabla.
-  private drawRefBadges(g: SVGGElement, outN: number, inN: number) {
+  // contadores "→n" (salientes) y "←n" (entrantes) en la cabecera de la tabla;
+  // su tooltip detalla qué tabla·propiedad referencia.
+  private drawRefBadges(g: SVGGElement, table: string, outN: number, inN: number) {
     const bh = 16,
       y = (HEAD_H - bh) / 2;
     let right = NODE_W - 6;
@@ -1345,10 +1584,7 @@ class Diagram extends MarkdownRenderChild {
       bg.classList.add("dbml-ref-badge", dir);
       bg.setAttribute("data-dir", dir);
       const tt = activeDocument.createElementNS(NS, "title");
-      tt.textContent =
-        dir === "in"
-          ? t("refInBadge", { n: String(n) })
-          : t("refOutBadge", { n: String(n) });
+      tt.textContent = this.badgeLabel(table, dir);
       bg.appendChild(tt);
       const r = this.rect(right - bw, y, bw, bh, "dbml-ref-badge-bg");
       r.setAttribute("rx", "8");
@@ -1369,7 +1605,15 @@ class Diagram extends MarkdownRenderChild {
 
   // panel desplegable con la lista de referencias entrantes/salientes. Cada fila:
   // clic izdo -> foco en esa tabla; clic derecho -> foco en ambas (tabla + ref).
-  private openRefPanel(table: string, dir: "in" | "out", evt: PointerEvent) {
+  // panel desplegable con la lista de referencias entrantes/salientes de la
+  // tabla (o solo de la columna `col` si se abrió desde un badge de columna).
+  // Cada fila: clic izdo -> vigilar esa tabla; botón medio -> enfocar ambas.
+  private openRefPanel(
+    table: string,
+    dir: "in" | "out",
+    col: string | null,
+    evt: PointerEvent
+  ) {
     if (!this.hostEl) return;
     this.closeRefPanel();
     const panel = this.hostEl.createDiv({ cls: "dbml-refpanel" });
@@ -1379,10 +1623,18 @@ class Diagram extends MarkdownRenderChild {
       dir === "out"
         ? t("refHeadingOut", { table })
         : t("refHeadingIn", { table });
-    const refs = this.model.refs.filter((r) =>
+    const all = this.model.refs.filter((r) =>
       dir === "out" ? r.from === table : r.to === table
     );
-    panel.createDiv({ cls: "dbml-refpanel-head", text: headKey });
+    const refs = col
+      ? all.filter((r) =>
+          dir === "out" ? r.fromCol === col : r.toCol === col
+        )
+      : all;
+    panel.createDiv({
+      cls: "dbml-refpanel-head",
+      text: col ? `${headKey} · ${col}` : headKey,
+    });
     if (!refs.length) {
       panel.createDiv({ cls: "dbml-refpanel-empty", text: t("refNoRefs") });
     }
@@ -1404,12 +1656,19 @@ class Diagram extends MarkdownRenderChild {
       row.title = t("refHint");
       row.addEventListener("click", (e) => {
         e.stopPropagation();
-        this.focusTable(target);
+        this.revealTable(target, true);
+        this.watchEdge(this.edgeKey(r));
+      });
+      row.addEventListener("auxclick", (e) => {
+        if (e.button === 1) {
+          e.preventDefault();
+          e.stopPropagation();
+          this.focusPair(table, target);
+        }
       });
       row.addEventListener("contextmenu", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        this.focusPair(table, target);
       });
     });
 
@@ -1496,7 +1755,7 @@ class Diagram extends MarkdownRenderChild {
         const tc = this.readableText(t.headerColor);
         if (tc) g.style.setProperty("--dbml-head-txt-fill", tc);
       }
-      this.drawRefBadges(g, outN, inN);
+      this.drawRefBadges(g, t.name, outN, inN);
 
       t.cols.forEach((c, i) => {
         // grupo por fila: su <title> convierte el hover de toda la columna en
@@ -1521,37 +1780,78 @@ class Diagram extends MarkdownRenderChild {
         cg.appendChild(rr);
 
         const y = HEAD_H + i * ROW_H + ROW_H / 2 + 4;
-        const nm = this.text(
-          14,
-          y,
-          c.name,
-          "dbml-col" + (c.pk ? " pk" : "")
-        );
+        const nm = this.text(14, y, c.name, c.pk ? "dbml-col pk" : "dbml-col");
         nm.setAttribute("data-col", String(i));
         cg.appendChild(nm);
-        if (c.pk || c.fk) {
-          const ic = this.text(
-            14 + c.name.length * 7 + 8,
-            y,
-            c.pk ? "🔑" : "🔗",
-            "dbml-icon"
-          );
-          ic.setAttribute("data-col", String(i));
-          cg.appendChild(ic);
+        // PK: el nombre en negrita + subrayado (sin emoji). FK: icono pequeño de
+        // eslabón/enlace — la referencia también la transmiten los badges.
+        if (c.fk) {
+          const lg = activeDocument.createElementNS(NS, "g");
+          lg.classList.add("dbml-icon-link");
+          lg.setAttribute("data-col", String(i));
+          const lx = 14 + c.name.length * 7 + 8;
+          const cy = y - 8;
+          for (const [dx, rot] of [
+            [-2, -18],
+            [2, 18],
+          ] as const) {
+            const el = activeDocument.createElementNS(NS, "ellipse");
+            el.setAttribute("cx", String(lx + dx));
+            el.setAttribute("cy", String(cy));
+            el.setAttribute("rx", "2.6");
+            el.setAttribute("ry", "5");
+            el.setAttribute("transform", `rotate(${rot} ${lx + dx} ${cy})`);
+            lg.appendChild(el);
+          }
+          cg.appendChild(lg);
         }
-        let tx = NODE_W - 14;
+        // badges de referencia por columna (misma lógica que la cabecera pero
+        // específica de esta propiedad): se apilan a la derecha, antes del tipo.
+        const colOut = this.model.refs.filter(
+          (r) => r.from === t.name && r.fromCol === c.name
+        ).length;
+        const colIn = this.model.refs.filter(
+          (r) => r.to === t.name && r.toCol === c.name
+        ).length;
+        let rightX = NODE_W - 14;
+        const colRefBadge = (dir: "in" | "out", n: number) => {
+          const bw = 14 + (1 + String(n).length) * 8;
+          const bg = activeDocument.createElementNS(NS, "g");
+          bg.classList.add("dbml-ref-badge", dir);
+          bg.setAttribute("data-dir", dir);
+          bg.setAttribute("data-col", String(i));
+          const tt = activeDocument.createElementNS(NS, "title");
+          tt.textContent = this.badgeLabel(t.name, dir, c.name);
+          bg.appendChild(tt);
+          const r = this.rect(rightX - bw, y - 13, bw, 15, "dbml-ref-badge-bg");
+          r.setAttribute("rx", "8");
+          r.setAttribute("data-col", String(i));
+          bg.appendChild(r);
+          const txt = this.text(
+            rightX - bw + 7,
+            y - 1.5,
+            `${dir === "in" ? "←" : "→"}${n}`,
+            "dbml-ref-badge-txt"
+          );
+          txt.setAttribute("data-col", String(i));
+          bg.appendChild(txt);
+          cg.appendChild(bg);
+          rightX -= bw + 4;
+        };
+        if (colOut > 0) colRefBadge("out", colOut);
+        if (colIn > 0) colRefBadge("in", colIn);
         if (c.nn) {
           const bw = 22;
-          const b = this.rect(NODE_W - 14 - bw, y - 13, bw, 15, "dbml-badge");
+          const b = this.rect(rightX - bw, y - 13, bw, 15, "dbml-badge");
           b.setAttribute("rx", "3");
           b.setAttribute("data-col", String(i));
           cg.appendChild(b);
-          const bt = this.text(NODE_W - 14 - bw / 2, y - 1.5, "NN", "dbml-badge-txt");
+          const bt = this.text(rightX - bw / 2, y - 1.5, "NN", "dbml-badge-txt");
           bt.setAttribute("data-col", String(i));
           cg.appendChild(bt);
-          tx = NODE_W - 14 - bw - 8;
+          rightX -= bw + 8;
         }
-        const ty = this.text(tx, y, c.type, "dbml-type");
+        const ty = this.text(rightX, y, c.type, "dbml-type");
         ty.setAttribute("data-col", String(i));
         cg.appendChild(ty);
       });
@@ -1634,36 +1934,133 @@ class Diagram extends MarkdownRenderChild {
   }
 
   // ---- interacción ----
+  // escribe el índice de columna bajo el cursor (o -1) resolviendo en el grupo
+  // de fila más cercano (data-col). Los badges de columna llevan data-col; los
+  // de cabecera no (null).
+  private elemCol(tgt: Element): number {
+    const el = tgt.closest?.('[data-col]');
+    if (!el) return -1;
+    const v = el.getAttribute("data-col");
+    const n = v !== null ? parseInt(v, 10) : NaN;
+    return Number.isFinite(n) ? n : -1;
+  }
+
+  private elemBadge(tgt: Element): { dir: "in" | "out"; col: number | null } | null {
+    const b = tgt.closest?.(".dbml-ref-badge");
+    if (!b) return null;
+    const col = b.getAttribute("data-col");
+    const dir = b.getAttribute("data-dir") === "in" ? "in" : "out";
+    return { dir, col: col !== null ? parseInt(col, 10) : null };
+  }
+
+  // refs que apuntan a la tabla/columna en la dirección dada.
+  private badgeRefs(
+    name: string,
+    dir: "in" | "out",
+    col?: string | null
+  ): Ref[] {
+    return this.model.refs.filter((r) =>
+      dir === "out"
+        ? r.from === name && (!col || r.fromCol === col)
+        : r.to === name && (!col || r.toCol === col)
+    );
+  }
+
+  // tablas alcanzables desde un badge (sin duplicados).
+  private badgeTables(refs: Ref[], dir: "in" | "out"): string[] {
+    const s = new Set<string>();
+    for (const r of refs) s.add(dir === "out" ? r.to : r.from);
+    return [...s];
+  }
+
+  // rótulo de un badge (cabecera o columna) = qué tabla y qué columna de la
+  // otra tabla referencia. Con varias referencias se listan separadas.
+  private badgeLabel(name: string, dir: "in" | "out", col?: string | null): string {
+    const refs = this.badgeRefs(name, dir, col);
+    if (!refs.length) return dir === "in" ? t("refInBadge", { n: "0" }) : t("refOutBadge", { n: "0" });
+    const names =
+      dir === "out"
+        ? refs.map((r) => `${r.to}.${r.toCol}`)
+        : refs.map((r) => `${r.from}.${r.fromCol}`);
+    return names.join("\n");
+  }
+
+  // clic sobre un badge de referencias (cabecera de tabla o columna):
+  //  - una única referencia: realiza la acción equivalente (botón izdo/dcho =
+  //    vigilar la tabla referenciada; botón medio = enfocar ambas).
+  //  - varias referencias: abre el panel selector para elegir.
+  private handleBadgeClick(
+    name: string,
+    badge: { dir: "in" | "out"; col: number | null },
+    button: number,
+    evt: PointerEvent
+  ) {
+    const col =
+      badge.col !== null && badge.col >= 0
+        ? this.model.tables.find((x) => x.name === name)?.cols[badge.col!]?.name ??
+          null
+        : null;
+    const refs = this.badgeRefs(name, badge.dir, col);
+    const targets = this.badgeTables(refs, badge.dir);
+    if (targets.length !== 1) {
+      // varias referencias: abrir el panel selector (cerrándolo antes de que
+      // el pointerdown de apertura se propague y lo cierre él mismo)
+      evt.stopPropagation();
+      evt.preventDefault();
+      const dir = badge.dir;
+      setTimeout(
+        () => this.openRefPanel(name, dir, col, evt),
+        0
+      );
+      return;
+    }
+    const other = targets[0];
+    if (button === 1) {
+      // clic medio: enfocar ambas tablas
+      this.focusPair(name, other);
+    } else {
+      // clic izdo/dcho: vigilar la tabla referenciada
+      this.revealTable(other, true);
+      this.watchEdge(this.edgeKey(refs[0]));
+    }
+  }
+
+  // acciones por botón en un nodo de tabla (cabecera, fila o badge):
+  //  izdo  = mover la tabla (si no está bloqueado)
+  //  dcho  = vigilar la tabla (centrar + mostrar todo)
+  //  medio = alternar el enfoque de la tabla
   private enableDrag(g: SVGGElement, name: string) {
     let sx = 0,
       sy = 0,
       ox = 0,
       oy = 0,
       dragging = false,
-      moved = false,
-      onHeader = false,
-      colIdx = -1,
-      badgeDir: "in" | "out" | null = null;
+      moved = false;
+    let colIdx = -1;
+    let badge: { dir: "in" | "out"; col: number | null } | null = null;
+    // pieza sobre la que se pulsó: clase, nombre de propiedad o su tipo.
+    let targetPart: "class" | "name" | "type" = "class";
     // Pointer capture: mv/up se enganchan al propio nodo (elemento propio que
     // se libera con el DOM al descargar), no a window -> sin fugas de listeners.
     g.addEventListener("pointerdown", (ev: PointerEvent) => {
-      ev.stopPropagation();
-      ev.preventDefault();
-      // solo el botón izquierdo arrastra; medio = enfocar, derecho = ir al código
-      dragging = ev.button === 0;
-      moved = false;
       const tgt = ev.target as Element;
-      onHeader =
-        tgt.classList.contains("dbml-head") ||
-        tgt.classList.contains("dbml-head-txt");
-      const bdg = tgt.closest?.(".dbml-ref-badge");
-      badgeDir = bdg
-        ? bdg.getAttribute("data-dir") === "in"
-          ? "in"
-          : "out"
-        : null;
-      const ca = tgt.getAttribute("data-col");
-      colIdx = ca !== null ? parseInt(ca, 10) : -1;
+      badge = this.elemBadge(tgt);
+      colIdx = badge ? (badge.col ?? -1) : this.elemCol(tgt);
+      targetPart =
+        colIdx < 0
+          ? "class"
+          : tgt.closest?.(".dbml-type")
+            ? "type"
+            : "name";
+      // botón izdo con layout BLOQUEADO y sin badge: no se arrastra la tabla;
+      // se deja pasar al pan del lienzo (pointerdown no se detiene aquí).
+      const letPan = ev.button === 0 && this.layoutLocked && !badge;
+      // solo el botón izquierdo mueve la tabla, y solo si no está bloqueado
+      // (ni clic sobre un badge: ese clic es "vigilar/focus", no arrastre).
+      dragging = ev.button === 0 && !badge && !this.layoutLocked;
+      moved = false;
+      // punto de agarre en coordenadas de cliente (no se puede restar 0: el
+      // primer pointermove haría saltar la tabla hacia la esquina inferior dcha).
       sx = ev.clientX;
       sy = ev.clientY;
       // en modo enfoque se arrastra la disposición compacta (layoutPos); fuera,
@@ -1671,10 +2068,16 @@ class Diagram extends MarkdownRenderChild {
       const target = this.layoutPos ? this.layoutPos[name] : this.pos[name];
       ox = target?.x ?? 0;
       oy = target?.y ?? 0;
-      try {
-        g.setPointerCapture(ev.pointerId);
-      } catch {
-        /* noop */
+      if (!letPan) {
+        ev.stopPropagation();
+        ev.preventDefault();
+      }
+      if (dragging) {
+        try {
+          g.setPointerCapture(ev.pointerId);
+        } catch {
+          /* noop */
+        }
       }
       const mv = (e: PointerEvent) => {
         if (!dragging) return;
@@ -1687,7 +2090,6 @@ class Diagram extends MarkdownRenderChild {
         P.y = oy + (e.clientY - sy) / this.view.k;
         g.setAttribute("transform", `translate(${P.x},${P.y})`);
         this.redrawEdges();
-        if (this.selectedEdge) this.redrawHandles();
       };
       const up = (e: PointerEvent) => {
         dragging = false;
@@ -1699,37 +2101,60 @@ class Diagram extends MarkdownRenderChild {
         } catch {
           /* noop */
         }
+        // pan del lienzo en curso (layout bloqueado): dejar que concluya
+        if (letPan) return;
         if (moved) {
           this.scheduleSaveLayout();
-        } else if (e.type === "pointercancel") {
-          // gesto abortado: no hacer nada
-        } else if (e.button === 2) {
-          // click derecho: saltar a la tabla/columna en el code panel (y evitar
-          // que el pointerup cierre cualquier menú/overlay abierto)
-          e.stopPropagation();
-          e.preventDefault();
+          return;
+        }
+        if (e.type === "pointercancel") return;
+        e.stopPropagation();
+        e.preventDefault();
+        const eve = e;
+        if (badge) {
+          this.handleBadgeClick(name, badge, e.button, eve);
+          return;
+        }
+        if (e.button === 2) {
+          // clic derecho: vigilar la TABLA en el diagrama y llevar el cursor del
+          // editor a su bloque (columna si el clic fue sobre una fila).
           const col =
             colIdx >= 0
               ? this.model.tables.find((x) => x.name === name)?.cols[colIdx]
                   ?.name ?? null
               : null;
-          this.onJump?.(name, col);
+          if (this.onJump) this.onJump(name, col, targetPart);
+          else this.revealTable(name, true);
         } else if (e.button === 1) {
-          // click medio: enfocar SOLO esta tabla
-          e.stopPropagation();
-          e.preventDefault();
-          this.focusTable(name);
-        } else if (badgeDir) {
-          // click izquierdo en la píldora de referencias: abrir el panel
-          e.stopPropagation();
-          e.preventDefault();
-          const ev = e;
-          setTimeout(() => this.openRefPanel(name, badgeDir!, ev), 0);
+          // clic medio: alternar enfoque
+          this.toggleFocusTable(name);
         }
+        // botón izquierdo sin arrastre: no hace nada (ya cubierto por el pan)
       };
       g.addEventListener("pointermove", mv);
       g.addEventListener("pointerup", up);
       g.addEventListener("pointercancel", up);
+    });
+    // doble clic en nombre de clase / propiedad: vigilar + llevar el cursor del
+    // editor a esa línea (solo si hay editor asociado; si no, solo vigilar).
+    g.addEventListener("dblclick", (ev: MouseEvent) => {
+      const tgt = ev.target as Element;
+      if (tgt.closest?.(".dbml-ref-badge")) return;
+      const ci = this.elemCol(tgt);
+      const col =
+        ci >= 0
+          ? this.model.tables.find((x) => x.name === name)?.cols[ci]?.name ??
+            null
+          : null;
+      ev.stopPropagation();
+      const part: "class" | "name" | "type" =
+        ci < 0
+          ? "class"
+          : tgt.closest?.(".dbml-type")
+            ? "type"
+            : "name";
+      if (this.onJump) this.onJump(name, col, part);
+      else this.revealTable(name, true);
     });
   }
 
@@ -1904,22 +2329,22 @@ class Diagram extends MarkdownRenderChild {
       psy = 0,
       pvx = 0,
       pvy = 0,
-      clickedEmpty = false,
       panned = false;
     this.registerDomEvent(host, "pointerdown", (e: PointerEvent) => {
       const tgt = e.target as Element;
-      if (tgt.closest(".dbml-node")) return;
-      if (tgt.closest(".dbml-edge-hit") || tgt.closest(".dbml-edge-handle"))
-        return;
+      // los nodos con layout desbloqueado detienen su propio pointerdown (drags);
+      // los bloqueados lo dejan pasar aquí para que el izdo haga pan. Si el
+      // pointerdown llega aquí sobre un nodo, es pan válido.
+      // clic izquierdo sobre una arista: pan normal (dcho/medio lo gestiona la
+      // propia arista). Los handles ya no existen (edición de rutas retirada).
+      if (tgt.closest(".dbml-edge-hit")) {
+        if (tgt.closest(".dbml-edge-handle") || e.button !== 0) return;
+      }
       // el panel de referencias y el toolbar no inician panning ni salen de foco
       if (tgt.closest(".dbml-refpanel") || tgt.closest(".dbml-erd-toolbar"))
         return;
-      // clic en vacío: deselecciona la arista activa
-      if (this.selectedEdge) {
-        this.selectedEdge = undefined;
-        this.refresh();
-      }
-      clickedEmpty = true;
+      // clic en vacío: solo pan. NO sale del modo enfoque (hay que salir con
+      // Esc o retirando las tablas del enfoque).
       panned = false;
       panning = true;
       host.addClass("panning");
@@ -1939,15 +2364,6 @@ class Diagram extends MarkdownRenderChild {
       if (!panning) return;
       panning = false;
       host.removeClass("panning");
-      // clic (sin arrastre) en el vacío mientras hay foco: se sale del enfoque
-      if (clickedEmpty && !panned) {
-        clickedEmpty = false;
-        if (this.focus) {
-          this.exitFocus();
-          return;
-        }
-      }
-      clickedEmpty = false;
       panned = false;
       this.scheduleSaveLayout();
     });
@@ -2050,6 +2466,16 @@ class Diagram extends MarkdownRenderChild {
 
 // Ventana/overlay a pantalla completa con el ERD a la izquierda y un editor
 // DBML conmutable a la derecha (previsualización en vivo + guardar en la nota).
+// Pieza bajo el cursor del editor, según el PATRÓN inverso por línea:
+// clase (palabra tras "Table") / propiedad (primera palabra) / su tipo.
+type CaretHit = {
+  table: string;
+  colIdx: number | null;
+  colName: string | null;
+  isClassDecl: boolean;
+  inType: boolean;
+  type: string | null;
+};
 class ErdWindowModal extends Modal {
   private plugin: DbmlErdPlugin;
   private clean: string;
@@ -2059,6 +2485,9 @@ class ErdWindowModal extends Modal {
   private drawHost?: HTMLElement;
   private codePanel?: HTMLElement;
   private codeBtn?: HTMLButtonElement;
+  // miga de pan: indica (tabla · columna) dónde está el cursor del editor.
+  private caretCrumb?: HTMLElement;
+  private onCaretCleanup?: () => void;
   private splitEl?: HTMLElement;
   private editor?: HTMLTextAreaElement;
   private codeOpen = true;
@@ -2067,6 +2496,9 @@ class ErdWindowModal extends Modal {
   private view?: { x: number; y: number; k: number };
   // sistema de layout activo en la ventana (se persiste como `// @layout`).
   private layoutKind: LayoutKind;
+  // layout bloqueado (se persiste como `// @layoutLocked`): impide arrastrar.
+  private layoutLocked: boolean;
+  private lockBtn?: HTMLButtonElement;
   // última tabla revelada en vivo (cursor/seek) para reaplicarla al re-render.
   private lastReveal: string | null = null;
   // último modelo parseado (para resolver la columna bajo el cursor).
@@ -2088,11 +2520,12 @@ class ErdWindowModal extends Modal {
       parseLayout(source) ??
       this.plugin.settings.layout ??
       DEFAULT_SETTINGS.layout;
+    this.layoutLocked = parseLayoutLocked(source);
     // el editor muestra el DBML "limpio": sin las anotaciones @pos/@view/@size/
-    // @edge/@layout que gestiona el plugin (se reinyectan al guardar).
+    // @edge/@layout/@layoutLocked que gestiona el plugin (se reinyectan al guardar).
     const lines = source.split("\n");
     const isAnnot = (l: string) =>
-      /^\s*\/\/\s*@(pos|view|size|edge|layout)\b/.test(l);
+      /^\s*\/\/\s*@(pos|view|size|edge|layout|layoutLocked)\b/.test(l);
     this.clean = lines.filter((l) => !isAnnot(l)).join("\n").replace(/\n+$/, "");
   }
 
@@ -2100,6 +2533,8 @@ class ErdWindowModal extends Modal {
     this.containerEl.addClass("erd-window-container");
     this.modalEl.addClass("erd-window");
     this.contentEl.addClass("erd-window-content");
+    // el botón ✕ del modal (esquina sup. dcha) sobra: ya hay botón "Cerrar".
+    this.modalEl.querySelector(".modal-close-button")?.remove();
 
     const head = this.contentEl.createDiv({ cls: "erd-window-head" });
     head.createSpan({ cls: "erd-window-title", text: t("windowTitle") });
@@ -2126,6 +2561,22 @@ class ErdWindowModal extends Modal {
       void this.preview();
     });
     layoutLabel.addEventListener("click", () => layoutSel.showPicker?.());
+
+    // candado del layout (se persiste al guardar como `// @layoutLocked`)
+    const lockBtn = head.createEl("button", {
+      cls: "erd-window-btn erd-window-lock",
+      text: this.layoutLocked ? "🔒" : "🔓",
+    });
+    this.lockBtn = lockBtn;
+    lockBtn.title = this.layoutLocked ? t("lockLayout") : t("unlockLayout");
+    if (this.layoutLocked) lockBtn.classList.add("is-active");
+    lockBtn.addEventListener("click", () => {
+      this.layoutLocked = !this.layoutLocked;
+      lockBtn.textContent = this.layoutLocked ? "🔒" : "🔓";
+      lockBtn.title = this.layoutLocked ? t("lockLayout") : t("unlockLayout");
+      lockBtn.classList.toggle("is-active", this.layoutLocked);
+      this.diagram?.setLayoutLocked(this.layoutLocked);
+    });
 
     const codeBtn = head.createEl("button", { text: t("windowCode") });
     codeBtn.classList.add("erd-window-btn", "is-active");
@@ -2154,6 +2605,11 @@ class ErdWindowModal extends Modal {
     const split = body.createDiv({ cls: "erd-window-split" });
     const code = body.createDiv({ cls: "erd-window-code" });
     this.codePanel = code;
+    // miga de pan SOBRE el editor (tabla · columna bajo el cursor): debe ir
+    // antes que el textarea para quedar arriba en el panel flex-columna.
+    const crumb = code.createDiv({ cls: "erd-window-crumb" });
+    crumb.textContent = t("crumbIdle");
+    this.caretCrumb = crumb;
     const ta = code.createEl("textarea", { cls: "erd-window-editor" });
     ta.value = this.clean;
     ta.spellcheck = false;
@@ -2165,6 +2621,17 @@ class ErdWindowModal extends Modal {
     });
     ta.addEventListener("click", () => this.updateLiveReveal());
     ta.addEventListener("keyup", () => this.updateLiveReveal());
+    // cualquier movimiento del cursor (clic, flechas, etc.) actualiza la miga
+    // de pan y el subrayado de columna, sin necesidad de editar. Se escucha en
+    // el documento Y en el propio textarea (algunos navegadores no propagan
+    // selectionchange de elementos input al documento).
+    const onCaret = () => this.updateLiveReveal();
+    this.onCaretCleanup = () => {
+      activeDocument.removeEventListener("selectionchange", onCaret);
+      ta.removeEventListener("selectionchange", onCaret);
+    };
+    activeDocument.addEventListener("selectionchange", onCaret);
+    ta.addEventListener("selectionchange", onCaret);
     this.splitEl = split;
     this.initSplit(split, code, body);
 
@@ -2180,39 +2647,150 @@ class ErdWindowModal extends Modal {
     this.splitEl?.toggleClass("hidden", !open);
   }
 
+  // Estructura de una línea de propiedad DBML:
+  //   "  nombre TIPO [ attr1, nota: '...' ]"
+  // Devuelve los cuatro componentes con sus posiciones (relativas a la línea):
+  // el NOMBRE (1ª palabra delimitada por espacios), el TIPO (desde la 1ª
+  // palabra tras el nombre hasta la última palabra que no sea espacio, antes de
+  // " [" o del final de línea) y el CONTENIDO dentro de los corchetes grandes
+  // "[...]" (p. ej. notas y restricciones).
+  private parsePropLine(line: string): {
+    name: string;
+    nameStart: number;
+    nameEnd: number;
+    type: string;
+    typeStart: number;
+    typeEnd: number;
+    attrs: string;
+    attrsStart: number;
+    attrsEnd: number;
+  } | null {
+    const lead = /^[ \t]*/.exec(line)?.[0].length ?? 0;
+    const nm = /("?)([^"'\s]+)\1/.exec(line.slice(lead));
+    if (!nm) return null;
+    const name = nm[2];
+    const nameStart = lead + nm.index;
+    const nameEnd = nameStart + name.length;
+    const rest = line.slice(lead + nm.index + nm[0].length);
+    // TIPO: primera palabra tras el nombre → última antes de " [" o del EOL.
+    const tt = /^[ \t]*(\S(?:[^\[]*?\S)?)[ \t]*(?:\[|$)/.exec(rest);
+    const type = tt ? tt[1] : "";
+    const typeStart = tt ? nameEnd + tt[0].indexOf(tt[1]) : nameEnd;
+    const typeEnd = typeStart + type.length;
+    // NOTA/atributos: lo que hay dentro de los corchetes grandes.
+    const aa = /^[ \t]*(\S(?:[^\[]*?\S)?)[ \t]*\[[ \t]*(.*?)[ \t]*\]/.exec(rest);
+    const attrs = aa ? aa[2] : "";
+    const attrsStart = aa ? nameEnd + aa[0].indexOf(aa[2]) : nameEnd;
+    const attrsEnd = attrsStart + attrs.length;
+    return { name, nameStart, nameEnd, type, typeStart, typeEnd, attrs, attrsStart, attrsEnd };
+  }
+
+  // Selección para saltar a la columna `col` de `table`: busca la línea de la
+  // propiedad DENTRO del bloque "Table … {" … "}" y devuelve el rango según la
+  // pieza pedida: nombre (1ª palabra), tipo (hasta la última palabra antes de
+  // " [" o del EOL) o ambos. PATRÓN clase: la palabra que sigue a "Table".
+  private locPropLine(
+    value: string,
+    table: string,
+    col: string,
+    part: "class" | "name" | "type" = "name"
+  ): { start: number; end: number } {
+    const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const tableRe = new RegExp(
+      `^[ \\t]*Table[ \\t]+["']?${esc(table)}["']?(?=[ \\t]*(?:\\[[^\\r\\n{}]*\\])?[ \\t]*\\{)`,
+      "m"
+    );
+    const tm = tableRe.exec(value);
+    const nameStart = tm
+      ? tm.index + tm[0].indexOf(table)
+      : value.indexOf(table);
+    if (tm) {
+      let depth = 0;
+      let close = value.length;
+      for (let i = tm.index; i < value.length; i++) {
+        const ch = value[i];
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+          depth--;
+          if (depth === 0) {
+            close = i;
+            break;
+          }
+        }
+      }
+      const block = value.slice(tm.index, close);
+      const lineRe = /[^\r\n]+/g;
+      let lm: RegExpExecArray | null;
+      while ((lm = lineRe.exec(block))) {
+        const p = this.parsePropLine(lm[0]);
+        if (!p || p.name !== col) continue;
+        const lineBase = tm.index + lm.index;
+        if (part === "type" && p.type) {
+          // PATRÓN tipo: solo el tipo de la propiedad
+          return {
+            start: lineBase + p.typeStart,
+            end: lineBase + p.typeEnd,
+          };
+        }
+        if (part === "name" || !p.type) {
+          // PATRÓN nombre: solo la primera palabra de la línea
+          return {
+            start: lineBase + p.nameStart,
+            end: lineBase + p.nameEnd,
+          };
+        }
+        // rango completo: nombre + tipo
+        return {
+          start: lineBase + p.nameStart,
+          end: lineBase + p.typeEnd,
+        };
+      }
+    }
+    // no hallada: selecciona el nombre de la clase
+    return { start: nameStart, end: nameStart + table.length };
+  }
+
   // muestra el editor y lleva el foco a la tabla (col opcional) resaltándola.
-  jumpTo(table: string, col: string | null) {
+  jumpTo(
+    table: string,
+    col: string | null,
+    part: "class" | "name" | "type" = "class"
+  ) {
     const ed = this.editor;
     if (!ed) return;
     const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const value = ed.value;
+    // PATRÓN tabla: "Table <nombre>" con ajustes tolerados entre el nombre y
+    // la llave, p. ej. "Table Companies [headercolor: #607D8B] {".
     const tableRe = new RegExp(
-      `^[ \\t]*Table[ \\t]+["']?${esc(table)}["']?\\b`,
+      `^[ \\t]*Table[ \\t]+["']?${esc(table)}["']?(?=[ \\t]*(?:\\[[^\\r\\n{}]*\\])?[ \\t]*\\{)`,
       "m"
     );
     let index = -1;
-    const tm = tableRe.exec(ed.value);
+    let selLen = table.length;
+    const tm = tableRe.exec(value);
     if (tm) {
-      index = tm.index;
+      const nameStart = tm.index + tm[0].indexOf(table);
       if (col) {
-        const rest = ed.value.slice(index);
-        const colRe = new RegExp(
-          `^[ \\t]*["']?${esc(col)}["']?[ \\t]`,
-          "m"
-        );
-        const cm = colRe.exec(rest);
-        if (cm) index += cm.index;
+        const loc = this.locPropLine(value, table, col, part);
+        index = loc.start;
+        selLen = loc.end - loc.start;
+      } else {
+        // selección del nombre de la clase (la palabra tras "Table")
+        index = nameStart;
+        selLen = table.length;
       }
     } else {
-      index = ed.value.indexOf(table);
+      index = value.indexOf(table);
     }
     if (index < 0) return;
     this.setCodeOpen(true);
     ed.focus();
-    ed.setSelectionRange(index, index + (col ?? table).length);
-    // revela la tabla buscada en el diagrama (solo en modo normal)
+    ed.setSelectionRange(index, index + selLen);
+    // revela la tabla buscada en el diagrama (revealTable sale del enfoque)
     this.lastReveal = table;
     const d = this.diagram;
-    if (d && !d.exploring && d.hasTable(table)) d.revealTable(table, true);
+    if (d && d.hasTable(table)) d.revealTable(table, true);
     this.updateLiveReveal(); // también subraya la columna saltada
     // desplazar la línea objetivo a ~1/3 de la altura visible
     const lh = parseFloat(getComputedStyle(ed).lineHeight) || 18;
@@ -2227,70 +2805,122 @@ class ErdWindowModal extends Modal {
 
   // reveal en vivo: la tabla cuyo bloque de código contiene el cursor se
   // concentra/resalta en el diagrama de la izquierda SIN entrar en modo
-  // enfoque (el resto de tablas permanece visible).
+  // enfoque (el resto de tablas permanece visible). También actualiza la miga
+  // de pan y el subrayado de columna con CADA movimiento del cursor.
   private updateLiveReveal() {
     const hit = this.tableAtCaret();
     const table = hit ? hit.table : null;
     const colIdx = hit ? hit.colIdx : null;
+    this.updateCrumb(hit);
     const d = this.diagram;
     if (table && table !== this.lastReveal) {
       this.lastReveal = table;
-      if (d && !d.exploring && d.hasTable(table)) d.revealTable(table, true);
+      // revealTable ya sale del modo enfoque si hace falta
+      if (d && d.hasTable(table)) d.revealTable(table, true);
     }
     // subraya la columna exacta del cursor en la tabla vigilada
-    if (d && !d.exploring && table && d.hasTable(table)) {
+    if (d && table && d.hasTable(table)) {
       d.markLiveRow(table, colIdx);
     } else {
       d?.markLiveRow(null, null);
     }
   }
 
-  // tabla cuyo bloque `Table x { ... }` contiene el cursor + columna de esa
-  // línea (null si el cursor está en el encabezado/notas/refs de la tabla).
-  private tableAtCaret(): { table: string; colIdx: number | null } | null {
-    const ed = this.editor;
-    if (!ed) return null;
-    const value = ed.value;
-    const sel = ed.selectionStart ?? 0;
-    if (sel < 0 || sel > value.length) return null;
-    const lineOf = (idx: number) => {
-      const str = value.slice(0, idx);
-      return (str.match(/\n/g) ?? []).length + 1;
-    };
-    const caretLine = lineOf(sel);
-    // primer token de la línea del cursor (posible nombre de columna)
-    let lineStart = value.lastIndexOf("\n", sel - 1) + 1;
-    const lineText = value.slice(lineStart, sel).trim();
-    const lineToken = /^"?([A-Za-z0-9_]+)"?\s+/.exec(lineText)?.[1] ?? "";
-    const re = /^\s*Table\s+([A-Za-z0-9_]+)\s*\{/gm;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(value))) {
-      const startLine = lineOf(m.index);
-      if (startLine > caretLine) break;
-      // cierre `}` a la profundidad de este bloque (los `{` de la tabla)
-      let depth = 0;
-      let i = m.index;
-      for (; i < value.length; i++) {
-        const ch = value[i];
-        if (ch === "{") depth++;
-        else if (ch === "}") {
-          depth--;
-          if (depth === 0) break;
-        }
-      }
-      if (i >= value.length) continue; // bloque sin cerrar: se ignora
-      if (caretLine <= lineOf(i)) {
-        const t = this.model?.tables.find((x) => x.name === m![1]);
-        let colIdx: number | null = null;
-        if (t && lineToken) {
-          const idx = t.cols.findIndex((c) => c.name === lineToken);
-          if (idx >= 0) colIdx = idx;
-        }
-        return { table: m[1], colIdx };
+  // miga de pan sobre el editor: muestra el resultado vivo del parseo inverso
+// de la línea bajo el cursor: clase, "clase · propiedad" o "clase · prop · tipo".
+private updateCrumb(hit: CaretHit | null) {
+  if (!this.caretCrumb) return;
+  if (!hit) {
+    this.caretCrumb.textContent = t("crumbIdle");
+    this.caretCrumb.removeAttribute("data-table");
+    this.caretCrumb.removeAttribute("data-col");
+    return;
+  }
+  const { table } = hit;
+  const col = hit.colName;
+  let text = table;
+  if (col && !hit.isClassDecl) {
+    text = hit.inType && hit.type ? `${table} · ${col} · ${hit.type}` : `${table} · ${col}`;
+  }
+  this.caretCrumb.textContent = text;
+  this.caretCrumb.setAttribute("data-table", table);
+  if (hit.colIdx !== null && hit.colIdx >= 0)
+    this.caretCrumb.setAttribute("data-col", String(hit.colIdx));
+  else this.caretCrumb.removeAttribute("data-col");
+}
+
+  // tablas/columnas vivos del cursor, por PARSE INVERSO de la línea:
+//  - línea que empieza por "Table" → declaración de clase; el nombre es la
+//    palabra que sigue a "Table" (PATRÓN clase).
+//  - cualquier otra línea dentro de una clase → su primera palabra es el nombre
+//    de la propiedad (PATRÓN propiedad); si el cursor cae sobre la parte del
+//    TIPO, se devuelve también ese tipo (PATRÓN tipo).
+private tableAtCaret(): CaretHit | null {
+  const ed = this.editor;
+  if (!ed) return null;
+  const value = ed.value;
+  const sel = ed.selectionStart ?? 0;
+  if (sel < 0 || sel > value.length) return null;
+  const lineOf = (idx: number) => value.slice(0, idx).split("\n").length;
+  const caretLine = lineOf(sel);
+  // línea completa donde está el cursor y su posición relativa
+  const lineStart = value.lastIndexOf("\n", sel - 1) + 1;
+  const lineEndIdx = value.indexOf("\n", sel);
+  const line = value.slice(
+    lineStart,
+    lineEndIdx < 0 ? value.length : lineEndIdx
+  );
+  const caretRel = sel - lineStart;
+
+  // PATRÓN clase: línea con "Table <nombre>" (los ajustes hasta "{" se toleran)
+  const tbl = /^[ \t]*Table[ \t]+("?)([^"'\s]+)\1/.exec(line);
+  const isClassDecl = !!tbl;
+  const lineFirst = /^[ \t]*("?)([^"'\s]+)\1/.exec(line);
+  // qué clase contiene la línea del cursor (bloque { ... } más cercano)
+  const re = /^[ \t]*Table[ \t]+("?)([^"'\s]+)\1(?=[ \t]*(?:\[[^\r\n{}]*\])?[ \t]*\{)/gm;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(value))) {
+    const startLine = lineOf(m.index);
+    if (startLine > caretLine) break;
+    let depth = 0;
+    let i = m.index;
+    for (; i < value.length; i++) {
+      const ch = value[i];
+      if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) break;
       }
     }
-    return null;
+    if (i >= value.length) continue; // bloque sin cerrar: se ignora
+    if (caretLine <= lineOf(i)) {
+      const t = this.model?.tables.find((x) => x.name === m![2]);
+      if (!t) return null;
+      let colIdx: number | null = null;
+      let colName: string | null = null;
+      let inType = false;
+      let type: string | null = null;
+      if (isClassDecl) {
+        colName = tbl ? tbl[2] : lineFirst ? lineFirst[2] : null;
+      } else if (lineFirst) {
+        // PATRÓN propiedad: primera palabra de la línea
+        colName = lineFirst[2];
+        const idx = t.cols.findIndex((c) => c.name === colName);
+        if (idx >= 0) colIdx = idx;
+        // PATRÓN tipo: el cursor cae dentro de la parte del tipo
+        const p = this.parsePropLine(line);
+        if (p && p.name === colName && p.type) {
+          if (caretRel >= p.typeStart && caretRel <= p.typeEnd) {
+            inType = true;
+            type = p.type;
+          }
+        }
+      }
+      return { table: m[2], colIdx, colName, isClassDecl, inType, type };
+    }
   }
+  return null;
+}
 
   private async preview() {
     if (!this.drawHost || !this.editor) return;
@@ -2341,7 +2971,8 @@ class ErdWindowModal extends Modal {
           size: parseSize(src) ?? undefined,
           savedEdges: parseEdges(src),
           layout: this.layoutKind,
-          onJump: (table, col) => this.jumpTo(table, col),
+          layoutLocked: this.layoutLocked,
+          onJump: (table, col, part) => this.jumpTo(table, col, part),
         }
       );
       // tras un re-render (cambio de layout o edición) se mantiene la última
@@ -2370,7 +3001,7 @@ class ErdWindowModal extends Modal {
   // escribe el código editado de vuelta en el bloque, conservando las
   // anotaciones del plugin (@pos/@view/@size/@edge/@layout) del archivo.
   private isAnnotLine(l: string) {
-    return /^\s*\/\/\s*@(pos|view|size|edge|layout)\b/.test(l);
+    return /^\s*\/\/\s*@(pos|view|size|edge|layout|layoutLocked)\b/.test(l);
   }
   private escRe(s: string) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -2457,7 +3088,9 @@ class ErdWindowModal extends Modal {
     if (!this.editor) return;
     const lines = data.split("\n");
     const [open, close] = range;
-    let annots = lines.slice(open + 1, close).filter((l) => this.isAnnotLine(l));
+    let annots: string[] = lines
+      .slice(open + 1, close)
+      .filter((l) => this.isAnnotLine(l));
     // la línea `@layout` se mantiene actualizada con el desplegable (una sola)
     let layoutWritten = false;
     annots = annots.map((l) => {
@@ -2468,6 +3101,17 @@ class ErdWindowModal extends Modal {
       return l;
     });
     if (!layoutWritten) annots.unshift(layoutLine(this.layoutKind));
+    // la línea `@layoutLocked` refleja el estado del candado (siempre escrita:
+    // ausencia = bloqueado por defecto; `false` persiste el desbloqueo)
+    let lockWritten = false;
+    annots = annots.map((l) => {
+      if (/^\s*\/\/\s*@layoutLocked\b/.test(l)) {
+        lockWritten = true;
+        return layoutLockLine(this.layoutLocked);
+      }
+      return l;
+    });
+    if (!lockWritten) annots.unshift(layoutLockLine(this.layoutLocked));
     let body = this.editor.value.replace(/\n+$/, "").split("\n");
     if (rename) {
       // también se renombra la anotación @pos (@pos Old …) para conservar la
@@ -2533,6 +3177,8 @@ class ErdWindowModal extends Modal {
     if (this.previewTimer) activeWindow.clearTimeout(this.previewTimer);
     this.diagram?.unload();
     this.diagram = undefined;
+    this.onCaretCleanup?.();
+    this.onCaretCleanup = undefined;
     if (activeDocument.fullscreenElement === this.containerEl)
       activeDocument.exitFullscreen?.().catch(() => {});
     this.contentEl.empty();
