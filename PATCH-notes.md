@@ -425,6 +425,15 @@ single consistent scheme and adds a redesigned table navigator.
   preset menu) is clamped to that range (the preset menu lists exactly
   25…175%). Above ~175% the node rendering starts to misbehave, so it is cut
   there; only the full-diagram `fit` may go below 25% (deliberate).
+- **The wheel is slow and conservative (60%–125%, preset menu unchanged).**
+  Scroll zooming uses gentle steps (`×1.04` / `÷1.04` instead of `×1.12`) and
+  is clamped to 60%–125%: you cannot zoom all the way out to 25% or beyond 125%
+  with the wheel alone — use `−`/`+` or the percentage menu for the outer
+  range. The dropdown still lists 25…175% as before.
+- **`⊡` fits the frame inside focus mode too.** Pressing the fit button while
+  focused now fits the *focused set* into the viewport and stays in focus mode
+  (remembering the new camera for the next re-entry) instead of exiting to the
+  normal mode. In normal mode it fits the whole diagram as before.
 - **No infinite canvas dragging.** `applyView()` now runs `clampView()` with a
   fixed-pixel rule: at least **120 px** of table must stay inside the frame on
   each axis, whichever way you drag. Diagrams smaller than that (e.g. zoomed

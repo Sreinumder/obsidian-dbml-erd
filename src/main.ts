@@ -214,6 +214,11 @@ class Diagram extends MarkdownRenderChild {
 // El encuadre del diagrama completo (fit) puede bajar de 25%: es voluntario.
   private static readonly MIN_ZOOM = 0.25;
   private static readonly MAX_ZOOM = 1.75;
+  // la RUEDA DE CEPILLADO es mucho más conservadora: 60%–125%. Por debajo del
+  // 60% no se baja con scroll (hay que usar −/menú), y por encima del 125%
+  // tampoco - así no "vuela" ni es tan fácil perderse.
+  private static readonly WHEEL_MIN_ZOOM = 0.6;
+  private static readonly WHEEL_MAX_ZOOM = 1.25;
   // regla de límite de arrastre FIJA en píxeles: siempre deben quedar al menos
   // KEEP_VISIBLE_PX px de tabla dentro del marco en cada eje arrastrando.
   private static readonly KEEP_VISIBLE_PX = 120;
@@ -435,7 +440,7 @@ class Diagram extends MarkdownRenderChild {
         this.setZoomPct(100);
       });
       this.btn(bar, "+", () => this.zoom(1.15));
-      this.btn(bar, "⊡", () => this.fitAll());
+      this.btn(bar, "⊡", () => this.fitIntoFrame());
       // ⊞ alterna el modo enfoque (clic medio sobre el vacío también lo hace).
       const fBtn = bar.createEl("button", { text: "⊞" });
       fBtn.title = t("toggleFocus");
@@ -1661,6 +1666,20 @@ class Diagram extends MarkdownRenderChild {
     return this.focus ? [...this.focus] : [];
   }
 
+  // ⊡ del toolbar o menú "Show all": encuadra lo visible. En modo normal encuadra
+  // el diagrama completo y vuelve a él (salirse del enfoque); en modo ENFOQUE el
+  // botón funciona igualmente: encuadra el conjunto enfocado en el marco sin salir
+  // del modo (fit() ya mira solo las tablas enfocadas) y memoriza esa cámara como
+  // la del modo enfoque.
+  private fitIntoFrame() {
+    if (this.focus) {
+      this.fit();
+      this.focusCamera = { x: this.view.x, y: this.view.y, k: this.view.k };
+    } else {
+      this.fitAll();
+    }
+  }
+
   // ⊡ del toolbar o menú "Show all": vuelve al diagrama completo.
   // `remember` = conservar el conjunto enfocado para restaurarlo al re-activar
   // el modo (⊞ / clic medio en el vacío). "Quitar todas" pasa false.
@@ -2699,10 +2718,14 @@ class Diagram extends MarkdownRenderChild {
       const r = host.getBoundingClientRect();
       const mx = e.clientX - r.left;
       const my = e.clientY - r.top;
-      // zoom con tope: 25%–175% (el anclaje al cursor usa la fracción efectiva)
+      // zoom con tope conservador para la rueda: 60%–125% (pasos lentos para
+      // no "volar" ni perderse; el anclaje al cursor usa la fracción efectiva)
       const k2 = Math.max(
-        Diagram.MIN_ZOOM,
-        Math.min(Diagram.MAX_ZOOM, this.view.k * (e.deltaY < 0 ? 1.12 : 0.89))
+        Diagram.WHEEL_MIN_ZOOM,
+        Math.min(
+          Diagram.WHEEL_MAX_ZOOM,
+          this.view.k * (e.deltaY < 0 ? 1.04 : 0.96)
+        )
       );
       const f = k2 / this.view.k;
       this.view.x = mx - (mx - this.view.x) * f;
