@@ -292,6 +292,10 @@ class Diagram extends MarkdownRenderChild {
   // que alternar el ⊞ conserva "dónde estabas y a qué zoom" en cada modo.
   private normalCamera: { x: number; y: number; k: number } | null = null;
   private focusCamera: { x: number; y: number; k: number } | null = null;
+  // último conjunto de tablas enfocadas (recordado al salir del modo): al
+  // volver a activar el modo enfoque (⊞ / clic medio en el vacío) se restaura
+  // ese mismo conjunto en vez de empezar de cero con una sola tabla.
+  private lastFocusTables: string[] | null = null;
   // "vigilancia temporal" al pasar el ratón por el dropdown: se guarda la cámara
   // previa al primer hover (hoverCamera) y se restaura al salir del panel.
   private hoverCamera: { x: number; y: number; k: number } | null = null;
@@ -429,7 +433,7 @@ class Diagram extends MarkdownRenderChild {
       clearAllB.title = t("focusClearAll");
       clearAllB.dataset.wide = "1";
       this.clearAllBtn = clearAllB;
-      this.registerDomEvent(clearAllB, "click", () => this.fitAll());
+      this.registerDomEvent(clearAllB, "click", () => this.fitAll(false));
       clearAllB.style.display = "none";
       const exitB = bar.createEl("button", { text: t("exitFocus") });
       exitB.title = t("exitFocus");
@@ -1632,12 +1636,16 @@ class Diagram extends MarkdownRenderChild {
   }
 
   // ⊡ del toolbar o menú "Show all": vuelve al diagrama completo.
-  private fitAll() {
+  // `remember` = conservar el conjunto enfocado para restaurarlo al re-activar
+  // el modo (⊞ / clic medio en el vacío). "Quitar todas" pasa false.
+  private fitAll(remember = true) {
     const hadFocus = !!this.focus;
     // al salir del modo enfoque se recuerda su cámara (para volver a ella al
     // re-entrar) y se restaura la cámara del modo normal que había al entrar.
     if (hadFocus) {
       this.focusCamera = { x: this.view.x, y: this.view.y, k: this.view.k };
+      this.lastFocusTables =
+        remember && this.focus && this.focus.size ? [...this.focus] : null;
     }
     this.focus = null;
     this.closeRefPanel();
@@ -1814,11 +1822,19 @@ class Diagram extends MarkdownRenderChild {
   }
 
   // ⊞ del toolbar / clic medio sobre el vacío: alterna el modo enfoque.
-  // Entrar: enfoca la tabla vigilada (o la primera si no hay ninguna).
-  // Salir: vuelve al diagrama completo.
+  // Salir: vuelve al diagrama completo guardando la cámara y el conjunto.
+  // Entrar: enfoca la tabla vigilada (o la primera) O, si quedó un conjunto
+  // enfocado recordado al salir, lo restaura tal cual.
   private toggleFocusMode() {
     if (this.exploring) {
       this.exitFocus();
+      return;
+    }
+    const prior = this.lastFocusTables;
+    if (prior && prior.length) {
+      this.focus = new Set(prior);
+      this.saveFocusState();
+      this.applyFocusView(true);
       return;
     }
     const first = this.watchedTable ?? this.model.tables[0]?.name;

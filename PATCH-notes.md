@@ -429,6 +429,12 @@ single consistent scheme and adds a redesigned table navigator.
   `fitAll`/"Clear all" all round-trip through this, so "at what part and at what
   zoom" you were is remembered independently in each mode. Focus-camera changes
   are never persisted (saves stay paused during focus).
+- **Focus set remembered across toggles.** Turning the mode off via `⊞`,
+  middle-click on empty canvas, Escape or "Salir" records the current focused
+  set (`lastFocusTables`); turning it back on restores exactly that set instead
+  of restarting with the single watched/first table. "Quitar todas" clears the
+  memory (passes `fitAll(false)`), as does unfocusing the last table one by one
+  — those start fresh next time.
 
 ## Files changed vs upstream
 
