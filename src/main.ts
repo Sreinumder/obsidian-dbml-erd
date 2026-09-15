@@ -209,16 +209,14 @@ export default class DbmlErdPlugin extends Plugin {
 }
 
 class Diagram extends MarkdownRenderChild {
-  // límites del zoom interactivo (coinciden con el menú de presets 25–400%).
-  // El encuadre del diagrama completo (fit) puede bajar de 25%: es voluntario.
+  // límites del zoom interactivo: 25%–175% (por encima de ~175% el renderizado
+// de los nodos empieza a dejar huecos/comportarse mal, así que se corta ahí).
+// El encuadre del diagrama completo (fit) puede bajar de 25%: es voluntario.
   private static readonly MIN_ZOOM = 0.25;
-  private static readonly MAX_ZOOM = 4;
-  // fracción máxima del viewport que puede quedar VACÍA al arrastrar (el resto
-  // de espacio "fuera del diagrama" en pantalla no debe pasar de ~30%).
-  private static readonly MAX_EMPTY = 0.3;
-  // suelo en px de tabla que debe seguir visible en cada eje si el diagrama es
-  // tan pequeño que ni siquiera un 30% de vacío es suficiente para perderlo.
-  private static readonly KEEP_VISIBLE = 40;
+  private static readonly MAX_ZOOM = 1.75;
+  // regla de límite de arrastre FIJA en píxeles: siempre deben quedar al menos
+  // KEEP_VISIBLE_PX px de tabla dentro del marco en cada eje arrastrando.
+  private static readonly KEEP_VISIBLE_PX = 120;
   private model: Model;
   private pos: Record<string, NodePos>;
   private elkEdges: Pt[][]; // ruta ELK original por ref
@@ -1349,7 +1347,7 @@ class Diagram extends MarkdownRenderChild {
     this.closeZoomMenu();
     const menu = this.hostEl.createDiv({ cls: "dbml-zoom-menu" });
     this.zoomMenu = menu;
-    const levels = [25, 50, 75, 90, 100, 125, 150, 200, 300, 400];
+    const levels = [25, 50, 75, 90, 100, 125, 150, 175];
     const cur = Math.round(this.view.k * 100);
     for (const p of levels) {
       const it = menu.createDiv({ cls: "dbml-zoom-menu-item" });
@@ -2701,7 +2699,7 @@ class Diagram extends MarkdownRenderChild {
       const r = host.getBoundingClientRect();
       const mx = e.clientX - r.left;
       const my = e.clientY - r.top;
-      // zoom con tope: 25%–400% (el anclaje al cursor usa la fracción efectiva)
+      // zoom con tope: 25%–175% (el anclaje al cursor usa la fracción efectiva)
       const k2 = Math.max(
         Diagram.MIN_ZOOM,
         Math.min(Diagram.MAX_ZOOM, this.view.k * (e.deltaY < 0 ? 1.12 : 0.89))
@@ -2750,38 +2748,40 @@ class Diagram extends MarkdownRenderChild {
     return any ? { minX, minY, maxX, maxY } : null;
   }
 
-// impide arrastrar el lienzo "hasta el infinito": al arrastrar hacia un lado
-// solo se permite ver un "vacío" de hasta ~30% del viewport por ese eje (suelo
-// de KEEP_VISIBLE px cuando el diagrama es pequeño); nunca se pierde el ERD.
+// impide arrastrar el lienzo "hasta el infinito": regla FIJA en píxeles —
+// siempre quedan al menos KEEP_VISIBLE_PX px de tabla dentro del marco en cada
+// eje arrastrando. Si el diagrama es tan pequeño que eso es imposible, se lo
+// mantiene entero a la vista (no se pierde el ERD).
   private clampView() {
     const b = this.contentBounds();
     if (!b) return;
     const r = this.svg.getBoundingClientRect();
     if (r.width === 0 || r.height === 0) return;
     const k = this.view.k;
-    this.clampAxis("x", r.width / k, b.minX, b.maxX);
-    this.clampAxis("y", r.height / k, b.minY, b.maxY);
+    const keep = Diagram.KEEP_VISIBLE_PX / k; // px → unidades de mundo
+    this.clampAxis("x", r.width / k, b.minX, b.maxX, keep);
+    this.clampAxis("y", r.height / k, b.minY, b.maxY, keep);
   }
 
   // encuadra el borde de inicio del viewport (v0 = -view.{x|y}/vw) en [lo, hi]:
-  //  - rango 30%: deja como máximo un vacío de ~30% del viewport por ese lado
-  //    (lo = cMin - E, hi = cMax - vw + E);
-  //  - si el diagrama es tan pequeño que ese rango se invierte, se cae al suelo
-  //    "mantener visible": siempre queda al menos KEEP_VISIBLE px de contenido;
-  //  - con un contenido más ancho que el viewport no hay vacío y no se toca nada.
+  //   lo = cMin − vw + keep, hi = cMax − keep  →  siempre hay ≥ keep de mundo
+  //   de contenido dentro del marco (sobra el rango => el contenido es más
+  //   ancho que el viewport y se puede arrastrar sin tocar nada);
+  // si el rango se invierte (diagrama más pequeño que el viewport+2·keep) se
+  // mantiene el diagrama entero a la vista: lo = cMax − vw, hi = cMin.
   private clampAxis(
     axis: "x" | "y",
     vw: number,
     cMin: number,
-    cMax: number
+    cMax: number,
+    keep: number
   ) {
-    const E = Math.max(Diagram.MAX_EMPTY * vw, Diagram.KEEP_VISIBLE);
-    let lo = cMin - E;
-    let hi = cMax - vw + E;
+    let lo = cMin - vw + keep;
+    let hi = cMax - keep;
     if (hi < lo) {
-      // diagrama pequeño en un viewport grande: usar el suelo de visibilidad
-      lo = cMin - vw + Diagram.KEEP_VISIBLE;
-      hi = cMax - Diagram.KEEP_VISIBLE;
+      // diagrama pequeño en un viewport grande: retenerlo entero a la vista
+      lo = cMax - vw;
+      hi = cMin;
     }
     if (hi < lo) return; // contenido más ancho que el viewport: no hay vacío
     const v0 = axis === "x" ? -this.view.x / vw : -this.view.y / vw;

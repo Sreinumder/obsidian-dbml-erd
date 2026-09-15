@@ -297,7 +297,7 @@ single consistent scheme and adds a redesigned table navigator.
   dropdown `✕` does.
 - **Toolbar reordered + clickable zoom.** The readout now sits between the zoom
   buttons as `− 100% + ⊡ ◎ ▾`. Clicking the percentage opens a small preset
-  menu (25…400%, plus the current level) that zooms keeping the canvas centre
+  menu (25…175%, plus the current level) that zooms keeping the canvas centre
   fixed; it closes on outside click or Escape.
 - **Locked layout pans from tables.** With the layout locked (the default) a
   left-drag over a table now pans the canvas instead of doing nothing, and the
@@ -421,14 +421,16 @@ single consistent scheme and adds a redesigned table navigator.
 - **Double-click the zoom percentage jumps to 100%.** A `dblclick` on the
   `dbml-zoom-pct` readout calls `setZoomPct(100)` (keeps the canvas centre
   fixed) — separate from the single-click preset menu.
-- **Zoom is bounded (25%–400%).** Interactive zoom (wheel, `+`/`−`,
-  preset menu) is clamped to the same range as the preset menu; only the
-  full-diagram `fit` may go below 25% (deliberate).
-- **No infinite canvas dragging.** `applyView()` now runs `clampView()`: the
-  amount of *empty* space beyond the diagram that panning can reveal is capped
-  at ~30% of the viewport per axis (per-side), with a 40 px floor so the content
-  can never fully leave the frame; diagrams wider than the viewport have no
-  void and are panned freely.
+- **Zoom is bounded (25%–175%).** Interactive zoom (wheel, `+`/`−`,
+  preset menu) is clamped to that range (the preset menu lists exactly
+  25…175%). Above ~175% the node rendering starts to misbehave, so it is cut
+  there; only the full-diagram `fit` may go below 25% (deliberate).
+- **No infinite canvas dragging.** `applyView()` now runs `clampView()` with a
+  fixed-pixel rule: at least **120 px** of table must stay inside the frame on
+  each axis, whichever way you drag. Diagrams smaller than that (e.g. zoomed
+  all the way out) are kept **entirely** on screen instead, so the content can
+  never leave the frame; diagrams wider than the viewport have no void and are
+  panned freely.
 - **Watch zoom floor of 75%.** If the current zoom is below 75%, watching a
   table jumps to 100% and centres it (`centerCameraOn`); at 75% or above the
   normal minimal-pan rule applies (keep your zoom).
