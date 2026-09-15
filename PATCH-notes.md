@@ -61,6 +61,20 @@ Notes written for a note-making workflow become useful directly on the diagram:
   - **Right click on a list row** → bring that table into the frame *together
     with the anchor table* (both fitted to the view). This is the "show me both
     tables" case.
+- **Focused tables are re-laid out compactly.** In focus mode the original
+  positions/orientations are ignored: the focused tables are arranged in a tight
+  horizontal row (gap 44px) as if the DBML contained only those tables. Edges are
+  re-routed (manhattan) on the fly; the original layout is untouched — the
+  persisted `@pos` lines only ever use the original coordinates, and leaving the
+  focus mode restores the diagram exactly as it was.
+- **Toolbar focus indicator.** The toolbar shows a label with the focused
+  table(s) in angle brackets (`<Warehouses>`, or `<A + B>` for a pair) while
+  focus is active; it disappears when not focused.
+- **Fullscreen button.** A `⛶` button in the toolbar expands the diagram block
+  to fill the whole window (element Fullscreen API). The SVG re-fits when
+  entering and leaving fullscreen; the toolbar/labels stay visible inside it.
+  Exit via the same button, Escape, or by closing the note (plugin exits
+  fullscreen on unload).
 - The header context menu gains **"Focus on this table"** and, while focused,
   **"Show all tables"**.
 - **Exiting focus mode:** toolbar `✕` button (appears only while focused), the
@@ -83,9 +97,9 @@ stay reachable and the whole feature is unhidden on very top right corner.
 
 | File | Change |
 |---|---|
-| `src/main.ts` | hover tooltips + menus (`drawNodes`, `openHeaderMenu/ColumnMenu`, `short`); focus mode + reference panel (fields, `visibleTables`, `redrawNodes`, `focusTable`, `focusPair`, `fitAll`, `exitFocus`, `drawRefBadges`, `openRefPanel`, `closeRefPanel`, `updateFocusUI`, `fitToPx`); toolbar `✕` button + ⊡→`fitAll`; Escape handler; focus-aware `redrawEdges`/`redrawHandles`/`fit`; empty-canvas click exits focus; toolbar/panel excluded from panning |
-| `src/i18n.ts` | new keys: `refOutBadge`, `refInBadge`, `refHeadingOut/In`, `refHint`, `refNoRefs`, `focusOn`, `showAll`, `exitFocus` (en + es) |
-| `styles.css` | toolbar → bottom-left; `.focus-exit` button; `.dbml-node-focus` outline; `.dbml-ref-badge*` pills; `.dbml-refpanel*` list |
+| `src/main.ts` | hover tooltips + menus (`drawNodes`, `openHeaderMenu/ColumnMenu`, `short`); focus mode + reference panel (`visibleTables`, `redrawNodes`, `focusTable`, `focusPair`, `fitAll`, `exitFocus`, `drawRefBadges`, `openRefPanel`, `closeRefPanel`, `updateFocusUI`, `fitToPx`); compact re-layout of focused tables (`layoutCompact`, `px()` accessor, focus-aware `redrawEdges`/`edgePts`/`fit`, drag writes to `layoutPos`, `@pos` persistence keeps original coords); toolbar `✕` + focus label + `⛶` fullscreen button (`toggleFullscreen`, `fullscreenchange` refit, exit on unload); Escape handler; empty-canvas click exits focus; toolbar/panel excluded from panning |
+| `src/i18n.ts` | new keys: `refOutBadge`, `refInBadge`, `refHeadingOut/In`, `refHint`, `refNoRefs`, `focusOn`, `showAll`, `exitFocus`, `fullscreen`, `fullscreenExit` (en + es) |
+| `styles.css` | toolbar → bottom-left; `.focus-exit` button; `.dbml-focus-label`; `.dbml-node-focus` outline; `.dbml-ref-badge*` pills; `.dbml-refpanel*` list; `:fullscreen` sizing |
 | `main.js` | rebuilt via `npm run build` after the source edits |
 
 Everything else remains as upstream 0.1.21 (`manifest.json`, `versions.json`).

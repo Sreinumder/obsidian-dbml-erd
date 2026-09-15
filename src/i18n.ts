@@ -60,6 +60,8 @@ const en: Dict = {
   focusOn: "Focus on this table",
   showAll: "Show all tables",
   exitFocus: "Exit focus mode",
+  fullscreen: "Fullscreen",
+  fullscreenExit: "Exit fullscreen",
   // modals
   cancel: "Cancel",
   save: "Save",
@@ -111,6 +113,8 @@ const es: Dict = {
   focusOn: "Enfocar esta tabla",
   showAll: "Mostrar todas las tablas",
   exitFocus: "Salir del modo enfoque",
+  fullscreen: "Pantalla completa",
+  fullscreenExit: "Salir de pantalla completa",
   cancel: "Cancelar",
   save: "Guardar",
   settingsLanguage: "Idioma",

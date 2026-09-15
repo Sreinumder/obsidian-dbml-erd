@@ -201,6 +201,15 @@ class Diagram extends MarkdownRenderChild {
   private refPanel?: HTMLElement;
   private refPanelCleanup?: () => void;
   private focusBtn?: HTMLButtonElement;
+  private focusLabel?: HTMLElement;
+  private fullscreenBtn?: HTMLButtonElement;
+  private hostFsed = false;
+  // en modo enfoque las tablas se re-dispersan en una fila compacta (se ignora
+  // la posición/orientación original); este mapa se descarta al salir.
+  private layoutPos: Record<
+    string,
+    { x: number; y: number; w?: number; h?: number }
+  > | null = null;
 
   constructor(
     parent: HTMLElement,
@@ -290,6 +299,25 @@ class Diagram extends MarkdownRenderChild {
     fb.style.display = "none";
     this.focusBtn = fb;
     this.registerDomEvent(fb, "click", () => this.exitFocus());
+    // etiqueta de la tabla(s) enfocada(s) actualmente, p.ej. "<Warehouses>"
+    const fl = bar.createSpan({ cls: "dbml-focus-label" });
+    fl.style.display = "none";
+    this.focusLabel = fl;
+    // pantalla completa (el bloque se expande a toda la ventana)
+    const full = bar.createEl("button", { text: "⛶" });
+    full.title = t("fullscreen");
+    this.fullscreenBtn = full;
+    this.registerDomEvent(full, "click", () => this.toggleFullscreen());
+    this.registerDomEvent(activeDocument, "fullscreenchange", () => {
+      const fs = activeDocument.fullscreenElement === this.hostEl;
+      if (this.fullscreenBtn)
+        this.fullscreenBtn.title = t(fs ? "fullscreenExit" : "fullscreen");
+      // al entrar y al salir el bloque cambia de tamaño: re-encuadrar
+      if (activeDocument.fullscreenElement === this.hostEl ||
+          (activeDocument.fullscreenElement === null && this.hostFsed))
+        activeWindow.requestAnimationFrame(() => this.fit(false));
+      this.hostFsed = activeDocument.fullscreenElement === this.hostEl;
+    });
 
     this.drawNodes();
     this.redrawEdges();
@@ -318,11 +346,50 @@ class Diagram extends MarkdownRenderChild {
     this.colorInput?.remove();
     this.colorInput = undefined;
     this.closeRefPanel();
+    // si el bloque está en pantalla completa, salir (evita huérfanos al cerrar)
+    if (activeDocument.fullscreenElement === this.hostEl)
+      void activeDocument.exitFullscreen();
   }
 
   private btn(bar: HTMLElement, label: string, cb: () => void) {
     const b = bar.createEl("button", { text: label });
     this.registerDomEvent(b, "click", cb);
+  }
+
+  // posición efectiva: en modo enfoque se usa el arreglo compacto (layoutPos),
+  // que se ignora la posición/orientación original; fuera de él, this.pos.
+  private px(name: string) {
+    return this.layoutPos ? this.layoutPos[name] ?? this.pos[name] : this.pos[name];
+  }
+
+  private toggleFullscreen() {
+    if (activeDocument.fullscreenElement === this.hostEl) {
+      void activeDocument.exitFullscreen();
+    } else {
+      void this.hostEl?.requestFullscreen?.().catch?.(() => {});
+    }
+  }
+
+  // fila compacta (tablas pegadas, ignorando su posición original) para las
+  // tablas enfocadas, en el orden del modelo.
+  private layoutCompact(
+    names: Set<string>
+  ): Record<string, { x: number; y: number; w: number; h: number }> {
+    const gap = 44;
+    const out: Record<string, { x: number; y: number; w: number; h: number }> = {};
+    let x = 0;
+    for (const t of this.model.tables) {
+      if (!names.has(t.name)) continue;
+      const w = NODE_W;
+      out[t.name] = {
+        x,
+        y: 0,
+        w,
+        h: HEAD_H + t.cols.length * ROW_H,
+      };
+      x += w + gap;
+    }
+    return out;
   }
 
   // ---- geometría ----
@@ -346,7 +413,7 @@ class Diagram extends MarkdownRenderChild {
     const out: { x: number; y: number; w: number; h: number }[] = [];
     for (const t of this.model.tables) {
       if (ig.has(t.name)) continue;
-      const p = this.pos[t.name];
+      const p = this.px(t.name);
       if (!p) continue;
       out.push({
         x: p.x,
@@ -387,8 +454,8 @@ class Diagram extends MarkdownRenderChild {
   // ruteo manhattan (para drag): Z entre puertos de columna, eligiendo un canal
   // vertical que no atraviese otras tablas.
   private manhattan(r: Ref): { pts: Pt[]; aSide: string; bSide: string } | null {
-    const A = this.pos[r.from];
-    const B = this.pos[r.to];
+    const A = this.px(r.from);
+    const B = this.px(r.to);
     if (!A || !B) return null;
     const ay = A.y + this.colRowY(r.from, r.fromCol);
     const by = B.y + this.colRowY(r.to, r.toCol);
@@ -412,7 +479,7 @@ class Diagram extends MarkdownRenderChild {
     const margin = 22;
     const cands = [baseMid, ax2, bx2];
     for (const t of this.model.tables) {
-      const p = this.pos[t.name];
+      const p = this.px(t.name);
       if (!p) continue;
       cands.push(p.x - margin, p.x + (p.w || NODE_W) + margin);
     }
@@ -542,7 +609,13 @@ class Diagram extends MarkdownRenderChild {
   private edgePts(r: Ref, i: number): Pt[] | null {
     const custom = this.customEdges[this.edgeKey(r)];
     if (custom && custom.length) return this.routeWithWaypoints(r, custom);
-    if (this.movedTables.has(r.from) || this.movedTables.has(r.to)) {
+    // en modo enfoque las tablas se re-dispersaron (layoutPos): la ruta ELK
+    // original queda desposicionada, así que se re-rutea manhattan siempre.
+    if (
+      this.layoutPos ||
+      this.movedTables.has(r.from) ||
+      this.movedTables.has(r.to)
+    ) {
       const m = this.manhattan(r);
       return m ? m.pts : null;
     }
@@ -558,8 +631,8 @@ class Diagram extends MarkdownRenderChild {
     mid: Pt[],
     base?: { aR: boolean; bR: boolean }
   ): { ax: number; ay: number; bx: number; by: number; aR: boolean; bR: boolean } | null {
-    const A = this.pos[r.from];
-    const B = this.pos[r.to];
+    const A = this.px(r.from);
+    const B = this.px(r.to);
     if (!A || !B) return null;
     const ay = A.y + this.colRowY(r.from, r.fromCol);
     const by = B.y + this.colRowY(r.to, r.toCol);
@@ -605,8 +678,8 @@ class Diagram extends MarkdownRenderChild {
   // intermedios estirados afín-mente (base->actual). Captura el frame base la
   // primera vez (p.ej. @edge cargado), cuando aún coincide con la posición real.
   private routeWithWaypoints(r: Ref, mid: Pt[]): Pt[] {
-    const A = this.pos[r.from];
-    const B = this.pos[r.to];
+    const A = this.px(r.from);
+    const B = this.px(r.to);
     if (!A || !B) return mid.slice();
     const key = this.edgeKey(r);
     if (!this.customEdgeBase[key]) {
@@ -999,10 +1072,22 @@ class Diagram extends MarkdownRenderChild {
     if (!this.focusBtn) return;
     const active = !!this.focus && this.focus.size > 0;
     this.focusBtn.style.display = active ? "" : "none";
+    if (this.focusLabel) {
+      const names = active
+        ? this.model.tables
+            .filter((x) => this.focus!.has(x.name))
+            .map((x) => x.name)
+        : [];
+      this.focusLabel.textContent = names.length ? `<${names.join(" + ")}>` : "";
+      this.focusLabel.style.display = names.length ? "" : "none";
+    }
   }
 
   private applyFocusView() {
     this.closeRefPanel();
+    // re-dispersa las tablas enfocadas en una fila compacta (ignora la
+    // posición/orientación original; esta disposición se descarta al salir).
+    this.layoutPos = this.layoutCompact(this.focus ?? new Set<string>());
     this.redrawNodes();
     this.redrawEdges();
     this.redrawHandles();
@@ -1027,6 +1112,7 @@ class Diagram extends MarkdownRenderChild {
     const hadFocus = !!this.focus;
     this.focus = null;
     this.closeRefPanel();
+    this.layoutPos = null; // descarta el arreglo compacto
     if (hadFocus) {
       this.redrawNodes();
       this.redrawEdges();
@@ -1166,7 +1252,7 @@ class Diagram extends MarkdownRenderChild {
   // ---- dibujo de nodos ----
   private drawNodes() {
     this.model.tables.forEach((t) => {
-      const P = this.pos[t.name];
+      const P = this.px(t.name);
       if (!P) return;
       // modo enfoque: oculta el resto de tablas
       if (this.focus && !this.focus.has(t.name)) return;
@@ -1381,8 +1467,11 @@ class Diagram extends MarkdownRenderChild {
       colIdx = ca !== null ? parseInt(ca, 10) : -1;
       sx = ev.clientX;
       sy = ev.clientY;
-      ox = this.pos[name].x;
-      oy = this.pos[name].y;
+      // en modo enfoque se arrastra la disposición compacta (layoutPos); fuera,
+      // la posición original persistida (this.pos).
+      const target = this.layoutPos ? this.layoutPos[name] : this.pos[name];
+      ox = target?.x ?? 0;
+      oy = target?.y ?? 0;
       try {
         g.setPointerCapture(ev.pointerId);
       } catch {
@@ -1392,13 +1481,12 @@ class Diagram extends MarkdownRenderChild {
         if (!dragging) return;
         if (!moved && Math.hypot(e.clientX - sx, e.clientY - sy) < 4) return;
         moved = true;
-        this.movedTables.add(name);
-        this.pos[name].x = ox + (e.clientX - sx) / this.view.k;
-        this.pos[name].y = oy + (e.clientY - sy) / this.view.k;
-        g.setAttribute(
-          "transform",
-          `translate(${this.pos[name].x},${this.pos[name].y})`
-        );
+        if (!this.layoutPos) this.movedTables.add(name);
+        const P = this.layoutPos ? this.layoutPos[name] : this.pos[name];
+        if (!P) return;
+        P.x = ox + (e.clientX - sx) / this.view.k;
+        P.y = oy + (e.clientY - sy) / this.view.k;
+        g.setAttribute("transform", `translate(${P.x},${P.y})`);
         this.redrawEdges();
         if (this.selectedEdge) this.redrawHandles();
       };
@@ -1680,6 +1768,8 @@ class Diagram extends MarkdownRenderChild {
       const posLines = this.model.tables
         .filter((t) => this.pos[t.name] && this.movedTables.has(t.name))
         .map((t) => {
+          // posiciones ORIGINALES (this.pos): la disposición compacta del modo
+          // enfoque es transitoria y no debe persistirse.
           const p = this.pos[t.name];
           return `// @pos ${t.name} ${Math.round(p.x)} ${Math.round(p.y)}`;
         });
@@ -1887,12 +1977,12 @@ class Diagram extends MarkdownRenderChild {
       maxY = -1e9;
     // encuadra solo lo visible: si hay modo enfoque, solo las tablas enfocadas
     for (const t of this.visibleTables()) {
-      const P = this.pos[t.name];
+      const P = this.px(t.name);
       if (!P) continue;
       minX = Math.min(minX, P.x);
       minY = Math.min(minY, P.y);
-      maxX = Math.max(maxX, P.x + P.w);
-      maxY = Math.max(maxY, P.y + P.h);
+      maxX = Math.max(maxX, P.x + (P.w || NODE_W));
+      maxY = Math.max(maxY, P.y + (P.h || HEAD_H + t.cols.length * ROW_H));
     }
     const pad = 40;
     const k = Math.min(

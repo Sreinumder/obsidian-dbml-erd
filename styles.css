@@ -157,6 +157,34 @@
   color: var(--text-on-accent);
 }
 
+/* etiqueta de tabla(s) enfocada(s) en la barra, p.ej. "<Warehouses>" */
+.dbml-focus-label {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  align-self: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 0 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+  user-select: none;
+}
+
+/* pantalla completa: el bloque se expande a toda la ventana */
+.dbml-erd-canvas:fullscreen {
+  width: 100vw !important;
+  height: 100vh !important;
+  resize: none;
+}
+.dbml-erd-canvas:fullscreen .dbml-erd-svg {
+  width: 100vw;
+  height: 100vh;
+}
+
 /* tabla enfocada (modo enfoque) */
 .dbml-node-focus .dbml-body {
   stroke: var(--interactive-accent);
