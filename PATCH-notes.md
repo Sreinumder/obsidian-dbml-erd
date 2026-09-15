@@ -415,7 +415,12 @@ single consistent scheme and adds a redesigned table navigator.
   camera does NOT move at all; if it sticks out, it computes the *minimum*
   per-axis translation (in world coords, current zoom kept) to bring the whole
   node in view and pans exactly that — as little on-screen change as possible.
-  Tables wider/taller than the viewport fall back to centering that axis.
+  The pan leaves ~40 px of breathing room around the table when it has to move
+  (no margin is added when the table is already fully visible). Tables
+  wider/taller than the viewport fall back to centering that axis.
+- **Double-click the zoom percentage jumps to 100%.** A `dblclick` on the
+  `dbml-zoom-pct` readout calls `setZoomPct(100)` (keeps the canvas centre
+  fixed) — separate from the single-click preset menu.
 - **Dropdown hover = temporary centred watch (peek).** `mouseenter` on a
   dropdown row centres the table (100% zoom, min-fit fallback — `centerCameraOn`,
   the old fit-to-table logic alone for this preview); the camera that was active

@@ -421,6 +421,11 @@ class Diagram extends MarkdownRenderChild {
         ev.stopPropagation();
         this.toggleZoomMenu();
       });
+      // doble clic: salto directo a 100% (manteniendo el centro del lienzo)
+      this.registerDomEvent(zp, "dblclick", (ev) => {
+        ev.stopPropagation();
+        this.setZoomPct(100);
+      });
       this.btn(bar, "+", () => this.zoom(1.15));
       this.btn(bar, "⊡", () => this.fitAll());
       // ⊞ alterna el modo enfoque (clic medio sobre el vacío también lo hace).
@@ -1732,9 +1737,10 @@ class Diagram extends MarkdownRenderChild {
     this.redrawHandles();
   }
 
-  // Mueve la cámara lo MÍNIMO para que la tabla quede entera dentro del marco,
-  // sin zoom y con el menor cambio posible en pantalla: si ya cabe completa no
-  // hace nada (ni un píxel). Compensa cada eje por separado.
+// Mueve la cámara lo MÍNIMO para mostrar la tabla CON un poco de aire
+// alrededor, sin zoom y con el menor cambio posible en pantalla: si ya cabe
+// completa en el marco no hace nada (ni un píxel, ni siquiera para ganar
+// margen); solo cuando hay que moverse se deja espacio extra alrededor.
   private ensureTableVisible(name: string) {
     const P = this.px(name);
     if (!P) return;
@@ -1753,25 +1759,27 @@ class Diagram extends MarkdownRenderChild {
     const vTop = -this.view.y / k;
     const vRight = (-this.view.x + r.width) / k;
     const vBot = (-this.view.y + r.height) / k;
-    // desplazamiento exigido del viewport en unidades de mundo por cada margen
-    // (d es el cambio del borde izdo del viewport, positivo = mover a la derecha)
-    const dLoX = right - vRight; // para meter el borde derecho
-    const dHiX = left - vLeft; // para meter el borde izquierdo
+    // tabla ya completamente dentro del marco → no mover nada
+    if (
+      left >= vLeft &&
+      right <= vRight &&
+      top >= vTop &&
+      bot <= vBot
+    )
+      return;
+    // hace falta barrer la cámara: se encuadra dejando aire (m px) a cada lado
+    const m = 40;
+    // d = desplazamiento del borde izdo del viewport (positivo = a la derecha)
+    const dLoX = right > vRight - m ? right - (vRight - m) : -Infinity;
+    const dHiX = left < vLeft + m ? left - (vLeft + m) : Infinity;
     let dX: number;
-    if (dHiX < dLoX) {
-      // tabla más ancha que la vista: imposible mostrarla entera; centrar x
-      dX = (left + right) / 2 - (vLeft + vRight) / 2;
-    } else {
-      dX = Math.min(Math.max(0, dLoX), dHiX);
-    }
-    const dLoY = bot - vBot;
-    const dHiY = top - vTop;
+    if (dLoX <= dHiX) dX = dLoX > 0 ? dLoX : dHiX < 0 ? dHiX : 0;
+    else dX = (left + right) / 2 - (vLeft + vRight) / 2;
+    const dLoY = bot > vBot - m ? bot - (vBot - m) : -Infinity;
+    const dHiY = top < vTop + m ? top - (vTop + m) : Infinity;
     let dY: number;
-    if (dHiY < dLoY) {
-      dY = (top + bot) / 2 - (vTop + vBot) / 2;
-    } else {
-      dY = Math.min(Math.max(0, dLoY), dHiY);
-    }
+    if (dLoY <= dHiY) dY = dLoY > 0 ? dLoY : dHiY < 0 ? dHiY : 0;
+    else dY = (top + bot) / 2 - (vTop + vBot) / 2;
     if ((dX === 0 && dY === 0) || !isFinite(dX) || !isFinite(dY)) return;
     this.view.x -= dX * k;
     this.view.y -= dY * k;
