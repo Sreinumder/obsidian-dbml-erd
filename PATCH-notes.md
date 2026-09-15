@@ -225,29 +225,41 @@ memory of the runtime state:
   but *all other tables remain visible* (unlike explore/focus mode, which hides
   them). The reveal follows the caret (input/click/keyup) and is re-applied after
   each debounced live re-render; it never fires while explore mode is active.
-- **"<Name>" navigator pill.** When not exploring, the toolbar label (bottom-left)
-  shows the watched table (`<Warehouses>`, or `<pick table…>` before the first
-  reveal) and is **clickable**: it opens an alphabetical `Menu` of all tables in
-  the schema. Picking one highlights, zooms to, and watches that table.
-- **`Diagram.revealTable(name)`** sets the watched table, re-renders the nodes
-  (adding the live class), and centers the view on that one table
-  (`fitToTable`) with the standard zoom cap; it exits an active explore mode
-  first. `Diagram.exploring` getter (public) lets the window decide when revealing
-  is allowed; `Diagram.refit()` re-frames the whole diagram (used when switching
-  layout systems); `Diagram.hasTable(name)` guards lookups.
-- **jump-to-code now reveals too.** Right-clicking a table/column in the diagram
-  selects the code line **and** reveals that table on the left (normal mode only).
-- **New i18n keys:** `navPick` (en + es).
+- **Column underline in the renderer.** In addition to the table border, the
+  exact column row (`.dbml-row-live`) being edited is underlined with a filled
+  accent stroke. `markLiveRow(table, idx)` applies this directly to the DOM
+  element (`.nodeLayer g[data-table] rect[data-col]`) without a full SVG redraw.
+- **`<Name>` navigator replaced by ◀/▶ buttons + `<select>` dropdown.** The
+  always-visible table navigator is now a proper toolbar control: `◀` (previous),
+  an alphabetical `<select>` showing the current watched table, and `▶` (next).
+  Selecting a table (or clicking ◀/▶) reveals it (highlight + fit-to-table with
+  generous padding that leaves neighboring content visible). The navigator hides
+  during explore mode.
+- **◎ "Fit watched table" button.** Re-centers/zooms the watched table with the
+  same generous padding, visible at all times.
+- **Zoom percentage display.** A `<span class="dbml-zoom-pct">` in the toolbar
+  shows `Math.round(k*100)%` — i.e. how large the text is relative to its
+  natural size (100% = unzoomed). Updated on every pan/zoom/fit.
+- **`fitToTable` padding.** The watched-table fit now uses `k = min((width*55%)/w, height*55%/h, 1.4)` so the table occupies ~55% of the view, leaving the
+  surrounding area visible (edges/neighbors partially shown).
+- **Rename + references prompt.** If the user renames a table in the editor
+  (detected by signature match: exactly one table disappears and a new one with
+  the same columns/types appears), `save()` shows a **ConfirmModal** asking
+  whether to rewrite all `Ref` lines and `@pos`/`@edge` annotation lines that
+  still reference the old name. On confirm the rewrite is applied before writing
+  back to the note; the cancelled path leaves the file unchanged.
+- **New i18n keys:** `navPrev`, `navNext`, `navFitWatched`, `renameTitle`,
+  `renameBody`, `renameApply` (en + es).
 
 ## Files changed vs upstream
 
 | File | Change |
 |---|---|
-| `src/main.ts` | focus mode + reference panel; compact re-layout of focused tables; toolbar `✕` + focus label; `ErdWindowModal` full-window overlay (editable code panel with live preview + save-back to note, drag-resizable split, stale-render guard, jump-to-code); `Diagram.openWindow()`, `opts.window` mode, `opts.onJump`, `Diagram.getView()`, plugin `layoutFor()` cache helper (capped at 256); removed in-block fullscreen (`⛶`/`fullscreenchange`/`enterFullscreen`); removed left-click menus + rename/type/color/delete helpers; middle-click → focus, right-click → jump to code; **layout dropdown + kind-aware cache key (`layoutKeyOf`), `// @layout` per-block line (parse/replace on save), Settings "Default layout"; radial (own circular ring) & organic (ELK stress) layouts with `routes: "manhattan"` self-routing; `Diagram.revealTable`/`fitToTable`/`exploring`/`refit`/`hasTable`, clickable `<Name>` table navigator pill, live-edit reveal (`dbml-node-live`)** |
+| `src/main.ts` | focus mode + reference panel; compact re-layout of focused tables; toolbar `✕` + focus label; `ErdWindowModal` full-window overlay (editable code panel with live preview + save-back to note, drag-resizable split, stale-render guard, jump-to-code); `Diagram.openWindow()`, `opts.window` mode, `opts.onJump`, `Diagram.getView()`, plugin `layoutFor()` cache helper (capped at 256); removed in-block fullscreen (`⛶`/`fullscreenchange`/`enterFullscreen`); removed left-click menus + rename/type/color/delete helpers; middle-click → focus, right-click → jump to code; **layout dropdown + kind-aware cache key (`layoutKeyOf`), `// @layout` per-block line (parse/replace on save), Settings "Default layout"; radial (own circular ring) & organic (ELK stress) layouts with `routes: "manhattan"` self-routing; `Diagram.revealTable`/`fitToTable`/`exploring`/`refit`/`hasTable`, ◀/▶ buttons + `<select>` table navigator, ◎ fit-watched button, zoom-% display (`dbml-zoom-pct`), live column underline (`markLiveRow`/`dbml-row-live`), rename + references prompt on save (`detectRename` + `ConfirmModal`)** |
 | `src/parser.ts` | **`LayoutKind`/`LAYOUT_KINDS`/`parseLayout`/`layoutLine` for the `// @layout` annotation** |
 | `src/layout.ts` | **`computeLayout(model, kind)`, `LayoutResult.routes`, custom `radialNodes` (circular ring) + `stressNodes` (organic), layered direction from kind** |
-| `src/i18n.ts` | new keys: `refOutBadge`, `refInBadge`, `refHeadingOut/In`, `refHint`, `refNoRefs`, `focusOn`, `showAll`, `exitFocus`, `windowOpen`, `windowTitle`, `windowCode`, `windowSave`, `windowSaved`, `windowSaveError`, `windowCopy`, `windowCopied`, `windowCopyError`, `windowExit` (en + es); **+ `layout`, `layered-lr`, `layered-tb`, `radial`, `organic`, `settingsLayout`, `settingsLayoutDesc`, `navPick` (en + es)** |
-| `styles.css` | toolbar → bottom-left; `.focus-exit` button; `.dbml-focus-label`; `.dbml-node-focus` outline; `.dbml-ref-badge*` pills; `.dbml-refpanel*` list; `.erd-window*` overlay, editor textarea, resizable split, hidden split; removed `:fullscreen` rules; **`.dbml-node-live`, `.dbml-nav` pill, `.erd-window-layout`/`-label`** |
+| `src/i18n.ts` | new keys: `refOutBadge`, `refInBadge`, `refHeadingOut/In`, `refHint`, `refNoRefs`, `focusOn`, `showAll`, `exitFocus`, `windowOpen`, `windowTitle`, `windowCode`, `windowSave`, `windowSaved`, `windowSaveError`, `windowCopy`, `windowCopied`, `windowCopyError`, `windowExit` (en + es); **+ `layout`, `layered-lr`, `layered-tb`, `radial`, `organic`, `settingsLayout`, `settingsLayoutDesc`, `navPrev`, `navNext`, `navFitWatched`, `renameTitle`, `renameBody`, `renameApply` (en + es)** |
+| `styles.css` | toolbar → bottom-left; `.focus-exit` button; `.dbml-focus-label`; `.dbml-node-focus` outline; `.dbml-ref-badge*` pills; `.dbml-refpanel*` list; `.erd-window*` overlay, editor textarea, resizable split, hidden split; removed `:fullscreen` rules; **`.dbml-node-live`, `.dbml-row-live`, `.dbml-zoom-pct`, `.dbml-nav-prev` (select + buttons)** |
 | `main.js` | rebuilt via `npm run build` after the source edits |
 
 Everything else remains as upstream 0.1.21 (`manifest.json`, `versions.json`).

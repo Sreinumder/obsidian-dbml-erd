@@ -259,6 +259,16 @@ class Diagram extends MarkdownRenderChild {
   // tabla "vigilada" del modo normal: se resalta (.dbml-node-live) y concentra
   // la vista sin ocultar el resto (a diferencia del modo enfoque/exploración).
   private watchedTable: string | null = null;
+  // navegador del toolbar (modo normal): anterior/siguiente + select de tablas.
+  private navPrev?: HTMLButtonElement;
+  private navNext?: HTMLButtonElement;
+  private navSelect?: HTMLSelectElement;
+  private navGroup?: HTMLElement;
+  // porcentaje de zoom visible en la barra (k*100 ⇒ tamaño de letra relativo).
+  private zoomPct?: HTMLElement;
+  // columna subrayada en vivo sobre la tabla vigilada (índice de fila).
+  private liveRow: { table: string; idx: number } | null = null;
+  private liveRowEl?: SVGRectElement;
 
   constructor(
     parent: HTMLElement,
@@ -359,6 +369,37 @@ class Diagram extends MarkdownRenderChild {
     this.btn(bar, "+", () => this.zoom(1.15));
     this.btn(bar, "−", () => this.zoom(0.87));
     this.btn(bar, "⊡", () => this.fitAll());
+    // encuadra SOLO la tabla vigilada (con margen, dejando visible su entorno)
+    const fitW = bar.createEl("button", { text: "◎" });
+    fitW.title = t("navFitWatched");
+    this.registerDomEvent(fitW, "click", () => {
+      if (this.watchedTable) this.revealTable(this.watchedTable, true);
+    });
+    const zp = bar.createSpan({ cls: "dbml-zoom-pct", text: "100%" });
+    this.zoomPct = zp;
+
+    // navegador de tablas (◀ select ▶): solo en modo normal.
+    const nav = bar.createDiv({ cls: "dbml-nav-prev" });
+    nav.style.display = "none";
+    this.navGroup = nav;
+    const prev = nav.createEl("button", { text: "◀" });
+    prev.title = t("navPrev");
+    this.navPrev = prev;
+    this.registerDomEvent(prev, "click", () => this.stepTable(-1));
+    const sel = nav.createEl("select", { cls: "dbml-nav-select" }) as HTMLSelectElement;
+    this.navSelect = sel;
+    for (const name of this.model.tables
+      .map((x) => x.name)
+      .sort((a, b) => a.localeCompare(b)))
+      sel.append(sel.createEl("option", { value: name, text: name }));
+    sel.addEventListener("change", () => {
+      if (sel.value && this.pos[sel.value]) this.revealTable(sel.value, true);
+    });
+    const next = nav.createEl("button", { text: "▶" });
+    next.title = t("navNext");
+    this.navNext = next;
+    this.registerDomEvent(next, "click", () => this.stepTable(1));
+
     const fb = bar.createEl("button", { text: "✕" });
     fb.classList.add("focus-exit");
     fb.title = t("exitFocus");
@@ -366,16 +407,11 @@ class Diagram extends MarkdownRenderChild {
     this.focusBtn = fb;
     this.registerDomEvent(fb, "click", () => this.exitFocus());
     // etiqueta de la tabla(s) enfocada(s) actualmente, p.ej. "<Warehouses>".
-    // En modo normal funciona como navegador: clic abre la lista de tablas y
-    // concentra la vista en la elegida (sin ocultar el resto).
+    // Solo se muestra en modo enfoque/exploración (en modo normal lo hace el
+    // <select> del navegador).
     const fl = bar.createSpan({ cls: "dbml-focus-label" });
     fl.style.display = "none";
     this.focusLabel = fl;
-    this.registerDomEvent(fl, "click", (e: MouseEvent) => {
-      if (this.focus) return; // en modo enfoque la etiqueta no navega
-      e.stopPropagation();
-      this.openTableNav(fl);
-    });
     // apertura en ventana/overlay a pantalla completa (fuera del code block)
     if (!opts?.window) {
       const win = bar.createEl("button", { text: "⤢" });
@@ -1157,23 +1193,32 @@ class Diagram extends MarkdownRenderChild {
     if (!this.focusBtn) return;
     const active = !!this.focus && this.focus.size > 0;
     this.focusBtn.style.display = active ? "" : "none";
-    if (!this.focusLabel) return;
-    if (active) {
-      // modo enfoque/exploración: etiqueta informativa (no navegable)
-      this.focusLabel.classList.remove("dbml-nav");
-      const names = this.model.tables
-        .filter((x) => this.focus!.has(x.name))
-        .map((x) => x.name);
-      this.focusLabel.textContent = names.length ? `<${names.join(" + ")}>` : "";
-      this.focusLabel.style.display = names.length ? "" : "none";
-    } else {
-      // modo normal: etiqueta-navegador de la tabla vigilada.
-      this.focusLabel.classList.add("dbml-nav");
-      this.focusLabel.textContent = this.watchedTable
-        ? `<${this.watchedTable}>`
-        : `<${t("navPick")}>`;
-      this.focusLabel.style.display = "";
+    if (this.navGroup) this.navGroup.style.display = active ? "none" : "";
+    if (this.focusLabel) {
+      if (active) {
+        const names = this.model.tables
+          .filter((x) => this.focus!.has(x.name))
+          .map((x) => x.name);
+        this.focusLabel.textContent = names.length ? `<${names.join(" + ")}>` : "";
+        this.focusLabel.style.display = names.length ? "" : "none";
+      } else {
+        // en modo normal la tabla vigilada la muestra el <select> del navegador
+        this.focusLabel.style.display = "none";
+      }
     }
+    if (this.navSelect) this.navSelect.value = this.watchedTable ?? "";
+  }
+
+  // banda al navegador del toolbar: tabla anterior/siguiente (alfabético).
+  private stepTable(dir: number) {
+    const names = this.model.tables
+      .map((x) => x.name)
+      .sort((a, b) => a.localeCompare(b));
+    if (!names.length) return;
+    const cur = this.watchedTable ?? names[0];
+    let idx = names.indexOf(cur);
+    if (idx < 0) idx = 0;
+    this.revealTable(names[(idx + dir + names.length) % names.length], true);
   }
 
   private applyFocusView() {
@@ -1237,31 +1282,12 @@ class Diagram extends MarkdownRenderChild {
     this.fitAll();
   }
 
-  // Menú del navegador (modo normal): lista alfabética de todas las tablas.
-  private openTableNav(anchor: Element) {
-    const menu = new Menu();
-    const names = this.model.tables
-      .map((x) => x.name)
-      .sort((a, b) => a.localeCompare(b));
-    for (const n of names) {
-      menu.addItem((item) =>
-        item
-          .setTitle(n)
-          .setDisabled(n === this.watchedTable)
-          .onClick(() => this.revealTable(n))
-      );
-    }
-    menu.showAtPosition({
-      x: anchor.getBoundingClientRect().right,
-      y: anchor.getBoundingClientRect().bottom,
-    });
-  }
-
   // Concentra la vista en una tabla concreta SIN ocultar el resto (a diferencia
   // del modo enfoque). Marca ".dbml-node-live" y actualiza el navegador.
   revealTable(name: string, fit = true) {
     if (!this.pos[name]) return;
     this.watchedTable = name;
+    this.markLiveRow(null, null);
     if (this.focus) {
       // en modo enfoque no aplica: se sale a la vista completa y se concentra.
       this.focus = null;
@@ -1276,7 +1302,8 @@ class Diagram extends MarkdownRenderChild {
     if (fit) this.fitToTable(name);
   }
 
-  // vista centrada en una sola tabla (llena la superficie disponible).
+  // vista centrada en la tabla vigilada: la encuadra CON margen alrededor para
+  // que se vea el contexto (tablas vecinas), sin ocultar el resto.
   private fitToTable(name: string) {
     const P = this.pos[name];
     const r = this.svg.getBoundingClientRect();
@@ -1284,15 +1311,18 @@ class Diagram extends MarkdownRenderChild {
     const t = this.model.tables.find((x) => x.name === name);
     const w = P.w || NODE_W;
     const h = P.h || HEAD_H + (t ? t.cols.length * ROW_H : 0);
-    const pad = 40;
+    // margen generoso: la tabla ocupa ~55% de la superficie para dejar ver el
+    // contenido que la rodea
     const k = Math.min(
-      (r.width - pad * 2) / w,
-      (r.height - pad * 2) / h,
+      (r.width * 0.55) / w,
+      (r.height * 0.55) / h,
       1.4
     );
     this.view.k = isFinite(k) && k > 0 ? k : 1;
-    this.view.x = pad - P.x * this.view.k + (r.width - pad * 2 - w * this.view.k) / 2;
-    this.view.y = pad - P.y * this.view.k;
+    const PX = (r.width - w * this.view.k) / 2;
+    const PY = (r.height - h * this.view.k) / 2;
+    this.view.x = PX - P.x * this.view.k;
+    this.view.y = PY - P.y * this.view.k;
     this.applyView();
   }
 
@@ -1427,6 +1457,7 @@ class Diagram extends MarkdownRenderChild {
       if (this.focus) g.classList.add("dbml-node-focus");
       if (this.watchedTable === t.name) g.classList.add("dbml-node-live");
       g.setAttribute("transform", `translate(${P.x},${P.y})`);
+      g.setAttribute("data-table", t.name);
       // nota de tabla: tooltip nativo al pasar el ratón por la cabecera (y por
       // cualquier fila sin nota propia, ya que <title> busca el ancestro más
       // cercano con tooltip).
@@ -1946,10 +1977,35 @@ class Diagram extends MarkdownRenderChild {
       "transform",
       `translate(${this.view.x},${this.view.y}) scale(${this.view.k})`
     );
+    // porcentaje de zoom = escala de la letra (k*100 % del tamaño natural)
+    if (this.zoomPct) this.zoomPct.textContent = Math.round(this.view.k * 100) + "%";
   }
   // vista actual (pan/zoom), para conservarla al re-renderizar en la ventana.
   getView() {
     return { x: this.view.x, y: this.view.y, k: this.view.k };
+  }
+  // consulta pública del diagrama (la ventana la usa antes de revelar).
+  hasTable(name: string) {
+    return !!this.pos[name];
+  }
+  // subraya en vivo la fila de columna editada sobre la tabla vigilada, sin
+  // re-renderizar todo el SVG (table=null o idx=null borran el marcado).
+  markLiveRow(table: string | null, idx: number | null) {
+    const prev = this.liveRowEl;
+    if (prev) {
+      prev.classList.remove("dbml-row-live");
+      this.liveRowEl = undefined;
+    }
+    this.liveRow = null;
+    if (!table || idx === null || !this.pos[table]) return;
+    this.liveRow = { table, idx };
+    const node = this.nodeLayer.querySelector(
+      `g[data-table="${CSS.escape(table)}"] rect[data-col="${idx}"]`
+    );
+    if (node) {
+      node.classList.add("dbml-row-live");
+      this.liveRowEl = node as SVGRectElement;
+    }
   }
   // true mientras el diagrama está en modo enfoque/exploración.
   get exploring() {
@@ -1959,10 +2015,6 @@ class Diagram extends MarkdownRenderChild {
   // cambiar de sistema de layout.
   refit() {
     this.fit(false);
-  }
-  // consulta pública del diagrama (la ventana la usa antes de revelar).
-  hasTable(name: string) {
-    return !!this.pos[name];
   }
   private fit(persist = false) {
     const r = this.svg.getBoundingClientRect();
@@ -2017,6 +2069,8 @@ class ErdWindowModal extends Modal {
   private layoutKind: LayoutKind;
   // última tabla revelada en vivo (cursor/seek) para reaplicarla al re-render.
   private lastReveal: string | null = null;
+  // último modelo parseado (para resolver la columna bajo el cursor).
+  private model?: Model;
   // al cambiar de layout se re-encuadra el diagrama completo tras el render.
   private refitNext = false;
 
@@ -2159,6 +2213,7 @@ class ErdWindowModal extends Modal {
     this.lastReveal = table;
     const d = this.diagram;
     if (d && !d.exploring && d.hasTable(table)) d.revealTable(table, true);
+    this.updateLiveReveal(); // también subraya la columna saltada
     // desplazar la línea objetivo a ~1/3 de la altura visible
     const lh = parseFloat(getComputedStyle(ed).lineHeight) || 18;
     const line = ed.value.slice(0, index).split("\n").length - 1;
@@ -2174,16 +2229,25 @@ class ErdWindowModal extends Modal {
   // concentra/resalta en el diagrama de la izquierda SIN entrar en modo
   // enfoque (el resto de tablas permanece visible).
   private updateLiveReveal() {
-    const t = this.tableAtCaret();
-    if (t && t !== this.lastReveal) {
-      this.lastReveal = t;
-      const d = this.diagram;
-      if (d && !d.exploring && d.hasTable(t)) d.revealTable(t, true);
+    const hit = this.tableAtCaret();
+    const table = hit ? hit.table : null;
+    const colIdx = hit ? hit.colIdx : null;
+    const d = this.diagram;
+    if (table && table !== this.lastReveal) {
+      this.lastReveal = table;
+      if (d && !d.exploring && d.hasTable(table)) d.revealTable(table, true);
+    }
+    // subraya la columna exacta del cursor en la tabla vigilada
+    if (d && !d.exploring && table && d.hasTable(table)) {
+      d.markLiveRow(table, colIdx);
+    } else {
+      d?.markLiveRow(null, null);
     }
   }
 
-  // nombre de la tabla cuyo bloque `Table x { ... }` contiene el cursor.
-  private tableAtCaret(): string | null {
+  // tabla cuyo bloque `Table x { ... }` contiene el cursor + columna de esa
+  // línea (null si el cursor está en el encabezado/notas/refs de la tabla).
+  private tableAtCaret(): { table: string; colIdx: number | null } | null {
     const ed = this.editor;
     if (!ed) return null;
     const value = ed.value;
@@ -2194,7 +2258,10 @@ class ErdWindowModal extends Modal {
       return (str.match(/\n/g) ?? []).length + 1;
     };
     const caretLine = lineOf(sel);
-    let found: string | null = null;
+    // primer token de la línea del cursor (posible nombre de columna)
+    let lineStart = value.lastIndexOf("\n", sel - 1) + 1;
+    const lineText = value.slice(lineStart, sel).trim();
+    const lineToken = /^"?([A-Za-z0-9_]+)"?\s+/.exec(lineText)?.[1] ?? "";
     const re = /^\s*Table\s+([A-Za-z0-9_]+)\s*\{/gm;
     let m: RegExpExecArray | null;
     while ((m = re.exec(value))) {
@@ -2212,9 +2279,17 @@ class ErdWindowModal extends Modal {
         }
       }
       if (i >= value.length) continue; // bloque sin cerrar: se ignora
-      if (caretLine <= lineOf(i)) found = m[1];
+      if (caretLine <= lineOf(i)) {
+        const t = this.model?.tables.find((x) => x.name === m![1]);
+        let colIdx: number | null = null;
+        if (t && lineToken) {
+          const idx = t.cols.findIndex((c) => c.name === lineToken);
+          if (idx >= 0) colIdx = idx;
+        }
+        return { table: m[1], colIdx };
+      }
     }
-    return found;
+    return null;
   }
 
   private async preview() {
@@ -2243,6 +2318,7 @@ class ErdWindowModal extends Modal {
     try {
       const model = parseDBML(src);
       if (stale()) return;
+      this.model = model;
       if (!model.tables.length) {
         host.createDiv({ cls: "dbml-erd-wrap", text: t("noTables") });
         return;
@@ -2293,40 +2369,121 @@ class ErdWindowModal extends Modal {
 
   // escribe el código editado de vuelta en el bloque, conservando las
   // anotaciones del plugin (@pos/@view/@size/@edge/@layout) del archivo.
+  private isAnnotLine(l: string) {
+    return /^\s*\/\/\s*@(pos|view|size|edge|layout)\b/.test(l);
+  }
+  private escRe(s: string) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
   private async save() {
     if (!this.editor) return;
-    const isAnnot = (l: string) =>
-      /^\s*\/\/\s*@(pos|view|size|edge|layout)\b/.test(l);
-    let ok = true;
-    await this.plugin.app.vault.process(this.file, (data) => {
-      const lines = data.split("\n");
-      const range = this.blockRange(lines, this.lineStart);
-      if (!range) {
-        ok = false;
-        return data;
+    const data = await this.plugin.app.vault.read(this.file);
+    const lines = data.split("\n");
+    const range = this.blockRange(lines, this.lineStart);
+    if (!range) {
+      new Notice(t("windowSaveError"));
+      return;
+    }
+    const oldBody = lines.slice(range[0] + 1, range[1]).join("\n");
+    const newBody = this.editor.value.replace(/\n+$/, "");
+    // si se renombró una tabla, se ofrece reescribir también sus referencias
+    let rename: { old: string; new: string } | null = null;
+    try {
+      rename = this.detectRename(oldBody, newBody);
+    } catch {
+      /* parseo roto en edición → se guarda tal cual */
+    }
+    if (rename) {
+      const n = this.countRefs(newBody, rename.old);
+      new ConfirmModal(
+        this.app,
+        t("renameTitle"),
+        t("renameBody", {
+          old: rename.old,
+          new: rename.new,
+          n: String(n),
+        }),
+        t("renameApply"),
+        () => void this.writeBack(data, range, rename)
+      ).open();
+      return;
+    }
+    await this.writeBack(data, range, null);
+  }
+
+  // una tabla renombrada = exactamente una desaparecida y una nueva con las
+  // MISMAS columnas/tipos; si cuadra, devuelve el mapeo old→new.
+  private detectRename(
+    oldSrc: string,
+    newSrc: string
+  ): { old: string; new: string } | null {
+    const a = parseDBML(oldSrc);
+    const b = parseDBML(newSrc);
+    const namesA = new Set(a.tables.map((x) => x.name));
+    const namesB = new Set(b.tables.map((x) => x.name));
+    const removed = a.tables.filter((x) => !namesB.has(x.name));
+    const added = b.tables.filter((x) => !namesA.has(x.name));
+    if (removed.length !== 1 || added.length !== 1) return null;
+    const sig = (t: { cols: { name: string; type: string }[] }) =>
+      t.cols.map((c) => `${c.name}:${c.type}`).join("|");
+    if (sig(removed[0]) !== sig(added[0])) return null;
+    return { old: removed[0].name, new: added[0].name };
+  }
+
+  private countRefs(src: string, tableName: string): number {
+    const re = new RegExp(`\\b${this.escRe(tableName)}\\b`, "g");
+    return src
+      .split("\n")
+      .filter((l) => /^\s*Ref:/i.test(l) && re.test(l)).length;
+  }
+
+  // reescribe el nombre de tabla en Ref/pos/edge (no toca otros tokens).
+  private renameRefLines(line: string, oldName: string, newName: string): string {
+    if (/^\s*Ref:/i.test(line) || /^\s*\/\/\s*@(pos|edge)\b/.test(line)) {
+      return line.replace(
+        new RegExp(`\\b${this.escRe(oldName)}\\b`, "g"),
+        newName
+      );
+    }
+    return line;
+  }
+
+  private async writeBack(
+    data: string,
+    range: [number, number],
+    rename: { old: string; new: string } | null
+  ) {
+    if (!this.editor) return;
+    const lines = data.split("\n");
+    const [open, close] = range;
+    let annots = lines.slice(open + 1, close).filter((l) => this.isAnnotLine(l));
+    // la línea `@layout` se mantiene actualizada con el desplegable (una sola)
+    let layoutWritten = false;
+    annots = annots.map((l) => {
+      if (/^\s*\/\/\s*@layout\b/.test(l)) {
+        layoutWritten = true;
+        return `// @layout ${this.layoutKind}`;
       }
-      const [open, close] = range;
-      const annots = lines.slice(open + 1, close).filter(isAnnot);
-      // la línea `@layout` se mantiene actualizada con el desplegable (una sola)
-      let layoutWritten = false;
-      const next = annots.map((l) => {
-        if (/^\s*\/\/\s*@layout\b/.test(l)) {
-          layoutWritten = true;
-          return `// @layout ${this.layoutKind}`;
-        }
-        return l;
-      });
-      if (!layoutWritten) next.unshift(layoutLine(this.layoutKind));
-      const body = this.editor!.value.replace(/\n+$/, "").split("\n");
-      return [
-        ...lines.slice(0, open + 1),
-        ...body,
-        ...next,
-        lines[close],
-        ...lines.slice(close + 1),
-      ].join("\n");
+      return l;
     });
-    new Notice(t(ok ? "windowSaved" : "windowSaveError"));
+    if (!layoutWritten) annots.unshift(layoutLine(this.layoutKind));
+    let body = this.editor.value.replace(/\n+$/, "").split("\n");
+    if (rename) {
+      // también se renombra la anotación @pos (@pos Old …) para conservar la
+      // posición (evita que la tabla renombrada salte al auto-layout).
+      body = body.map((l) => this.renameRefLines(l, rename.old, rename.new));
+      annots = annots.map((l) => this.renameRefLines(l, rename.old, rename.new));
+    }
+    const content = [
+      ...lines.slice(0, open + 1),
+      ...body,
+      ...annots,
+      lines[close],
+      ...lines.slice(close + 1),
+    ].join("\n");
+    await this.plugin.app.vault.process(this.file, () => content);
+    new Notice(t("windowSaved"));
   }
 
   private blockRange(
