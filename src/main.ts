@@ -957,23 +957,19 @@ class Diagram extends MarkdownRenderChild {
       const g = activeDocument.createElementNS(NS, "g");
       g.classList.add("dbml-node");
       g.setAttribute("transform", `translate(${P.x},${P.y})`);
+      // nota de tabla: tooltip nativo al pasar el ratón por la cabecera (y por
+      // cualquier fila sin nota propia, ya que <title> busca el ancestro más
+      // cercano con tooltip).
+      if (t.note) {
+        const tt = activeDocument.createElementNS(NS, "title");
+        tt.textContent = t.note;
+        g.appendChild(tt);
+      }
       const h = HEAD_H + t.cols.length * ROW_H;
 
       const body = this.rect(0, 0, NODE_W, h, "dbml-body");
       body.setAttribute("rx", "6");
       g.appendChild(body);
-
-      t.cols.forEach((_, i) => {
-        const rr = this.rect(
-          1,
-          HEAD_H + i * ROW_H,
-          NODE_W - 2,
-          ROW_H,
-          i % 2 ? "dbml-row alt" : "dbml-row"
-        );
-        rr.setAttribute("data-col", String(i));
-        g.appendChild(rr);
-      });
 
       const head = this.rect(0, 0, NODE_W, HEAD_H, "dbml-head");
       head.setAttribute("rx", "6");
@@ -990,6 +986,27 @@ class Diagram extends MarkdownRenderChild {
       }
 
       t.cols.forEach((c, i) => {
+        // grupo por fila: su <title> convierte el hover de toda la columna en
+        // el tooltip de su nota (el ancestro más cercano gana sobre la tabla).
+        const cg = activeDocument.createElementNS(NS, "g");
+        cg.setAttribute("data-col", String(i));
+        if (c.note) {
+          const tt = activeDocument.createElementNS(NS, "title");
+          tt.textContent = `${c.name} — ${c.note}`;
+          cg.appendChild(tt);
+        }
+        g.appendChild(cg);
+
+        const rr = this.rect(
+          1,
+          HEAD_H + i * ROW_H,
+          NODE_W - 2,
+          ROW_H,
+          i % 2 ? "dbml-row alt" : "dbml-row"
+        );
+        rr.setAttribute("data-col", String(i));
+        cg.appendChild(rr);
+
         const y = HEAD_H + i * ROW_H + ROW_H / 2 + 4;
         const nm = this.text(
           14,
@@ -998,7 +1015,7 @@ class Diagram extends MarkdownRenderChild {
           "dbml-col" + (c.pk ? " pk" : "")
         );
         nm.setAttribute("data-col", String(i));
-        g.appendChild(nm);
+        cg.appendChild(nm);
         if (c.pk || c.fk) {
           const ic = this.text(
             14 + c.name.length * 7 + 8,
@@ -1007,7 +1024,7 @@ class Diagram extends MarkdownRenderChild {
             "dbml-icon"
           );
           ic.setAttribute("data-col", String(i));
-          g.appendChild(ic);
+          cg.appendChild(ic);
         }
         let tx = NODE_W - 14;
         if (c.nn) {
@@ -1015,15 +1032,15 @@ class Diagram extends MarkdownRenderChild {
           const b = this.rect(NODE_W - 14 - bw, y - 13, bw, 15, "dbml-badge");
           b.setAttribute("rx", "3");
           b.setAttribute("data-col", String(i));
-          g.appendChild(b);
+          cg.appendChild(b);
           const bt = this.text(NODE_W - 14 - bw / 2, y - 1.5, "NN", "dbml-badge-txt");
           bt.setAttribute("data-col", String(i));
-          g.appendChild(bt);
+          cg.appendChild(bt);
           tx = NODE_W - 14 - bw - 8;
         }
         const ty = this.text(tx, y, c.type, "dbml-type");
         ty.setAttribute("data-col", String(i));
-        g.appendChild(ty);
+        cg.appendChild(ty);
       });
 
       this.enableDrag(g, t.name);
@@ -1186,6 +1203,14 @@ class Diagram extends MarkdownRenderChild {
   private openHeaderMenu(name: string, evt: PointerEvent) {
     if (!this.plugin || !this.ctx || !this.blockEl) return;
     const menu = new Menu();
+    const tbl = this.model.tables.find((x) => x.name === name);
+    const tNote = tbl?.note;
+    if (tNote) {
+      menu.addItem((i) =>
+        i.setIcon("info").setTitle(this.short(tNote, 200))
+      );
+      menu.addSeparator();
+    }
     menu.addItem((i) =>
       i
         .setTitle(t("renameTable"))
@@ -1231,6 +1256,12 @@ class Diagram extends MarkdownRenderChild {
     const col = tbl?.cols[colIdx];
     if (!col) return;
     const menu = new Menu();
+    if (col.note) {
+      menu.addItem((i) =>
+        i.setIcon("info").setTitle(this.short(`${col.name} — ${col.note}`, 200))
+      );
+      menu.addSeparator();
+    }
     menu.addItem((i) =>
       i
         .setTitle(t("renameColumn"))
@@ -1482,6 +1513,11 @@ class Diagram extends MarkdownRenderChild {
       return done ? lines.join("\n") : data;
     });
     if (!done) new Notice(t("tableNotFound", { name }));
+  }
+
+  // recorta un texto largo para mostrarlo en una línea de menú (notas).
+  private short(s: string, n: number): string {
+    return s.length > n ? s.slice(0, n - 1) + "…" : s;
   }
 
   // lee px inline explícitos; ignora "", "100%", "auto", etc.
