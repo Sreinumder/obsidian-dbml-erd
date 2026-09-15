@@ -183,13 +183,71 @@ memory of the runtime state:
 - **ELK layout cache cap:** capped at 256 entries to avoid unbounded growth during
   sustained editing in the overlay window.
 
+### 7. Layout system dropdown: hierarchical / radial / organic (branch `feat/focus-and-ref-ui`)
+
+- **Swappable layout algorithms.** A **Layout `<select>`** in the overlay window
+  header lets you switch live between four systems, persisted per block as a
+  `// @layout <kind>` annotation line written on **Save**:
+  - `layered-lr` — hierarchical left→right (the classic layout; **default**).
+  - `layered-tb` — hierarchical top→bottom.
+  - `radial` — **circular "spherical" ring** we compute ourselves (finite and
+    deterministic). ELK's own `radial` algorithm throws
+    `The given graph is not a tree!` on cyclic ERDs, so it can't be used.
+  - `organic` — ELK `stress` (force-directed cluster-ball look; works on cyclic
+    graphs).
+- **Own orthogonal edge router for non-hierarchical layouts.** `LayoutResult`
+  now carries `routes: "elk" | "manhattan"`. For `radial`/`organic` the edges are
+  routed by the diagram's existing 90° router (was only enabled during focus
+  mode); for `layered-*`, ELK shapes them as before.
+- **`@pos` only applies to hierarchical layouts.** Manual saved positions override
+  the auto-layout only when the block uses `layered-lr`/`layered-tb`; switching to
+  `radial`/`organic` (or the per-block annotation) ignores them so the geometry
+  stays clean.
+- **Parsing/persisting.** `parser.ts` exports `LayoutKind`, the `LAYOUT_KINDS`
+  list, `parseLayout(source)` and `layoutLine(kind)`. The layout-annotation line
+  is stripped for the clean editor text, rebuilt as `@layout` on **Save** (always
+  exactly one, matching the dropdown), and preserved by `buildLayoutContent`.
+- **Cache keys now include the layout kind.** `plugin.layoutKeyOf(source, kind)`
+  keys the layout cache on `kind + DBML-without-@pos/@view/@size/@edge/@layout`,
+  so each kind is cached independently and re-renders after save reuse it (no
+  async placeholder flicker). `layoutFor(source, model, kind)` takes the kind
+  explicitly; the modal reuses the same cache, matching the block.
+- **Settings default.** New "Default layout" dropdown in the Settings tab
+  (`settings.layout`); blocks without a `// @layout` line use it.
+- **New i18n keys:** `layout`, `layered-lr`, `layered-tb`, `radial`, `organic`,
+  `settingsLayout`, `settingsLayoutDesc` (en + es).
+
+### 8. Live-edit reveal + table navigator (branch `feat/focus-and-ref-ui`)
+
+- **Live-edit reveal (not focus mode).** While typing in the code editor, the
+  table whose `Table … { }` block contains the cursor is highlighted with a
+  dashed outline (`.dbml-node-live`) **and zoomed to fill the draw area** —
+  but *all other tables remain visible* (unlike explore/focus mode, which hides
+  them). The reveal follows the caret (input/click/keyup) and is re-applied after
+  each debounced live re-render; it never fires while explore mode is active.
+- **"<Name>" navigator pill.** When not exploring, the toolbar label (bottom-left)
+  shows the watched table (`<Warehouses>`, or `<pick table…>` before the first
+  reveal) and is **clickable**: it opens an alphabetical `Menu` of all tables in
+  the schema. Picking one highlights, zooms to, and watches that table.
+- **`Diagram.revealTable(name)`** sets the watched table, re-renders the nodes
+  (adding the live class), and centers the view on that one table
+  (`fitToTable`) with the standard zoom cap; it exits an active explore mode
+  first. `Diagram.exploring` getter (public) lets the window decide when revealing
+  is allowed; `Diagram.refit()` re-frames the whole diagram (used when switching
+  layout systems); `Diagram.hasTable(name)` guards lookups.
+- **jump-to-code now reveals too.** Right-clicking a table/column in the diagram
+  selects the code line **and** reveals that table on the left (normal mode only).
+- **New i18n keys:** `navPick` (en + es).
+
 ## Files changed vs upstream
 
 | File | Change |
 |---|---|
-| `src/main.ts` | focus mode + reference panel; compact re-layout of focused tables; toolbar `✕` + focus label; `ErdWindowModal` full-window overlay (editable code panel with live preview + save-back to note, drag-resizable split, stale-render guard, jump-to-code); `Diagram.openWindow()`, `opts.window` mode, `opts.onJump`, `Diagram.getView()`, plugin `layoutFor()` cache helper (capped at 256); removed in-block fullscreen (`⛶`/`fullscreenchange`/`enterFullscreen`); removed left-click menus + rename/type/color/delete helpers; middle-click → focus, right-click → jump to code |
-| `src/i18n.ts` | new keys: `refOutBadge`, `refInBadge`, `refHeadingOut/In`, `refHint`, `refNoRefs`, `focusOn`, `showAll`, `exitFocus`, `windowOpen`, `windowTitle`, `windowCode`, `windowSave`, `windowSaved`, `windowSaveError`, `windowCopy`, `windowCopied`, `windowCopyError`, `windowExit` (en + es) |
-| `styles.css` | toolbar → bottom-left; `.focus-exit` button; `.dbml-focus-label`; `.dbml-node-focus` outline; `.dbml-ref-badge*` pills; `.dbml-refpanel*` list; `.erd-window*` overlay, editor textarea, resizable split, hidden split; removed `:fullscreen` rules |
+| `src/main.ts` | focus mode + reference panel; compact re-layout of focused tables; toolbar `✕` + focus label; `ErdWindowModal` full-window overlay (editable code panel with live preview + save-back to note, drag-resizable split, stale-render guard, jump-to-code); `Diagram.openWindow()`, `opts.window` mode, `opts.onJump`, `Diagram.getView()`, plugin `layoutFor()` cache helper (capped at 256); removed in-block fullscreen (`⛶`/`fullscreenchange`/`enterFullscreen`); removed left-click menus + rename/type/color/delete helpers; middle-click → focus, right-click → jump to code; **layout dropdown + kind-aware cache key (`layoutKeyOf`), `// @layout` per-block line (parse/replace on save), Settings "Default layout"; radial (own circular ring) & organic (ELK stress) layouts with `routes: "manhattan"` self-routing; `Diagram.revealTable`/`fitToTable`/`exploring`/`refit`/`hasTable`, clickable `<Name>` table navigator pill, live-edit reveal (`dbml-node-live`)** |
+| `src/parser.ts` | **`LayoutKind`/`LAYOUT_KINDS`/`parseLayout`/`layoutLine` for the `// @layout` annotation** |
+| `src/layout.ts` | **`computeLayout(model, kind)`, `LayoutResult.routes`, custom `radialNodes` (circular ring) + `stressNodes` (organic), layered direction from kind** |
+| `src/i18n.ts` | new keys: `refOutBadge`, `refInBadge`, `refHeadingOut/In`, `refHint`, `refNoRefs`, `focusOn`, `showAll`, `exitFocus`, `windowOpen`, `windowTitle`, `windowCode`, `windowSave`, `windowSaved`, `windowSaveError`, `windowCopy`, `windowCopied`, `windowCopyError`, `windowExit` (en + es); **+ `layout`, `layered-lr`, `layered-tb`, `radial`, `organic`, `settingsLayout`, `settingsLayoutDesc`, `navPick` (en + es)** |
+| `styles.css` | toolbar → bottom-left; `.focus-exit` button; `.dbml-focus-label`; `.dbml-node-focus` outline; `.dbml-ref-badge*` pills; `.dbml-refpanel*` list; `.erd-window*` overlay, editor textarea, resizable split, hidden split; removed `:fullscreen` rules; **`.dbml-node-live`, `.dbml-nav` pill, `.erd-window-layout`/`-label`** |
 | `main.js` | rebuilt via `npm run build` after the source edits |
 
 Everything else remains as upstream 0.1.21 (`manifest.json`, `versions.json`).

@@ -70,12 +70,22 @@ const en: Dict = {
   windowCopied: "DBML copied to clipboard",
   windowCopyError: "Could not copy DBML",
   windowExit: "Close",
+  // layout system
+  layout: "Layout",
+  "layered-lr": "Hierarchical (L→R)",
+  "layered-tb": "Hierarchical (T→B)",
+  radial: "Radial (circular)",
+  organic: "Organic (force-directed)",
+  navPick: "pick table…",
   // modals
   cancel: "Cancel",
   save: "Save",
   // settings
   settingsLanguage: "Language",
   settingsLanguageDesc: "Interface language for menus, dialogs and notices.",
+  settingsLayout: "Default layout",
+  settingsLayoutDesc:
+    "Diagram layout used by default (each code block can override it with a `// @layout` line set from the window view).",
 };
 
 const es: Dict = {
@@ -131,11 +141,21 @@ const es: Dict = {
   windowCopied: "DBML copiado al portapapeles",
   windowCopyError: "No se pudo copiar el DBML",
   windowExit: "Cerrar",
+  // sistema de layout
+  layout: "Layout",
+  "layered-lr": "Jerárquico (I→D)",
+  "layered-tb": "Jerárquico (A→B)",
+  radial: "Radial (circular)",
+  organic: "Orgánico (por fuerzas)",
+  navPick: "elegir tabla…",
   cancel: "Cancelar",
   save: "Guardar",
   settingsLanguage: "Idioma",
   settingsLanguageDesc:
     "Idioma de la interfaz para menús, diálogos y avisos.",
+  settingsLayout: "Layout por defecto",
+  settingsLayoutDesc:
+    "Sistema de layout usado por defecto (cada bloque puede anularlo con una línea `// @layout` elegida desde la vista de ventana).",
 };
 
 const dicts: Record<Lang, Dict> = { en, es };

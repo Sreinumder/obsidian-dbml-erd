@@ -20,6 +20,10 @@ import {
   parseView,
   parseSize,
   parseEdges,
+  LayoutKind,
+  LAYOUT_KINDS,
+  parseLayout,
+  layoutLine,
 } from "./parser";
 import {
   computeLayout,
@@ -35,8 +39,10 @@ const NS = "http://www.w3.org/2000/svg";
 
 interface DbmlErdSettings {
   lang: Lang;
+  // sistema de layout por defecto (por bloque puede anularse con `// @layout`)
+  layout: LayoutKind;
 }
-const DEFAULT_SETTINGS: DbmlErdSettings = { lang: "en" };
+const DEFAULT_SETTINGS: DbmlErdSettings = { lang: "en", layout: "layered-lr" };
 
 export default class DbmlErdPlugin extends Plugin {
   settings: DbmlErdSettings = { ...DEFAULT_SETTINGS };
@@ -81,15 +87,18 @@ export default class DbmlErdPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  // layout ELK con cache (misma clave que renderBlock): lo reutiliza el modo
-  // "ventana" para no recalcular el layout al abrir el diagrama en un overlay.
-  async layoutFor(source: string, model: Model): Promise<LayoutResult> {
-    const layoutKey = source
-      .replace(/^[ \t]*\/\/[ \t]*@(pos|view|size|edge)\b.*$/gm, "")
-      .trim();
+  // layout ELK/custom con cache (misma clave que renderBlock): lo reutiliza el
+  // modo "ventana" para no recalcular el layout al abrir el diagrama en un
+  // overlay. `kind` = sistema de layout (el de la nota o el elegido en vivo).
+  async layoutFor(
+    source: string,
+    model: Model,
+    kind: LayoutKind
+  ): Promise<LayoutResult> {
+    const layoutKey = this.layoutKeyOf(source, kind);
     let layout = this.layoutCache.get(layoutKey);
     if (!layout) {
-      layout = await computeLayout(model);
+      layout = await computeLayout(model, kind);
       // evita que el cache crezca indefinidamente (uso intensivo al editar en
       // la ventana); al vaciar, el siguiente render del code block calcula de
       // nuevo con una pausa breve (placeholder) pero no crece la memoria.
@@ -97,6 +106,18 @@ export default class DbmlErdPlugin extends Plugin {
       this.layoutCache.set(layoutKey, layout);
     }
     return layout;
+  }
+
+  // clave de cache: sistema de layout + DBML sin anotaciones de disposición
+  // (pos/view/size/edge/layout no afectan a la geometría calculada).
+  private layoutKeyOf(source: string, kind: LayoutKind): string {
+    return (
+      kind +
+      "\n" +
+      source
+        .replace(/^[ \t]*\/\/[ \t]*@(pos|view|size|edge|layout)\b.*$/gm, "")
+        .trim()
+    );
   }
 
   async renderBlock(
@@ -123,18 +144,19 @@ export default class DbmlErdPlugin extends Plugin {
       return;
     }
     try {
-      // El layout ELK depende solo de la estructura DBML, no de las anotaciones
-      // de disposición; al ignorarlas en la clave, un re-render por guardado
-      // reusa el layout cacheado y se renderiza sin pausa async (sin parpadeo).
-      const layoutKey = source
-        .replace(/^[ \t]*\/\/[ \t]*@(pos|view|size|edge)\b.*$/gm, "")
-        .trim();
+      const kind =
+        parseLayout(source) ?? this.settings.layout ?? DEFAULT_SETTINGS.layout;
+      // El layout depende solo de la estructura DBML y del sistema elegido, no
+      // de las anotaciones de disposición; al ignorarlas en la clave, un
+      // re-render por guardado reusa el layout cacheado y se renderiza sin
+      // pausa async (sin parpadeo).
+      const layoutKey = this.layoutKeyOf(source, kind);
       let layout = this.layoutCache.get(layoutKey);
       if (!layout) {
         // primer cálculo: muestra placeholder mientras ELK trabaja (async)
         el.empty();
         el.createDiv({ cls: "dbml-erd-wrap" }).setText(t("rendering"));
-        layout = await computeLayout(model);
+        layout = await computeLayout(model, kind);
         this.layoutCache.set(layoutKey, layout);
       }
       el.empty();
@@ -153,6 +175,7 @@ export default class DbmlErdPlugin extends Plugin {
       const layoutForInstance: LayoutResult = {
         nodes: freshNodes,
         edges: layout.edges,
+        routes: layout.routes,
       };
       ctx.addChild(
         new Diagram(wrap, model, layoutForInstance, {
@@ -164,6 +187,7 @@ export default class DbmlErdPlugin extends Plugin {
           view: view ?? undefined,
           size: size ?? undefined,
           savedEdges,
+          layout: kind,
         })
       );
     } catch (e) {
@@ -228,6 +252,14 @@ class Diagram extends MarkdownRenderChild {
     { x: number; y: number; w?: number; h?: number }
   > | null = null;
 
+  // sistema de layout activo y quién rutea las aristas: ELK ("elk", jerárquico)
+  // o el router ortogonal propio ("manhattan", radial/organic).
+  private layoutKind: LayoutKind;
+  private routingMode: "elk" | "manhattan";
+  // tabla "vigilada" del modo normal: se resalta (.dbml-node-live) y concentra
+  // la vista sin ocultar el resto (a diferencia del modo enfoque/exploración).
+  private watchedTable: string | null = null;
+
   constructor(
     parent: HTMLElement,
     model: Model,
@@ -246,19 +278,24 @@ class Diagram extends MarkdownRenderChild {
       window?: boolean;
       // click derecho en tabla/columna: salta a esa posición en el editor.
       onJump?: (table: string, col: string | null) => void;
+      // sistema de layout (default plugins.settings.layout si no se pasa).
+      layout?: LayoutKind;
     }
   ) {
     super(parent);
     this.model = model;
     this.pos = layout.nodes;
     this.elkEdges = layout.edges.map((e) => e.pts);
+    this.layoutKind = opts?.layout ?? "layered-lr";
+    this.routingMode = layout.routes;
     this.plugin = opts?.plugin;
     this.ctx = opts?.ctx;
     this.blockEl = opts?.el;
     this.onJump = opts?.onJump;
 
-    // aplica posiciones guardadas (override del layout ELK)
-    if (opts?.savedPos) {
+    // aplica posiciones guardadas (override del layout ELK): solo tienen
+    // sentido en los layouts jerárquicos; en radial/organic se descartan.
+    if (opts?.savedPos && this.layoutKind.startsWith("layered")) {
       for (const [name, p] of Object.entries(opts.savedPos)) {
         if (this.pos[name]) {
           this.pos[name].x = p.x;
@@ -328,10 +365,17 @@ class Diagram extends MarkdownRenderChild {
     fb.style.display = "none";
     this.focusBtn = fb;
     this.registerDomEvent(fb, "click", () => this.exitFocus());
-    // etiqueta de la tabla(s) enfocada(s) actualmente, p.ej. "<Warehouses>"
+    // etiqueta de la tabla(s) enfocada(s) actualmente, p.ej. "<Warehouses>".
+    // En modo normal funciona como navegador: clic abre la lista de tablas y
+    // concentra la vista en la elegida (sin ocultar el resto).
     const fl = bar.createSpan({ cls: "dbml-focus-label" });
     fl.style.display = "none";
     this.focusLabel = fl;
+    this.registerDomEvent(fl, "click", (e: MouseEvent) => {
+      if (this.focus) return; // en modo enfoque la etiqueta no navega
+      e.stopPropagation();
+      this.openTableNav(fl);
+    });
     // apertura en ventana/overlay a pantalla completa (fuera del code block)
     if (!opts?.window) {
       const win = bar.createEl("button", { text: "⤢" });
@@ -649,7 +693,10 @@ class Diagram extends MarkdownRenderChild {
     if (custom && custom.length) return this.routeWithWaypoints(r, custom);
     // en modo enfoque las tablas se re-dispersaron (layoutPos): la ruta ELK
     // original queda desposicionada, así que se re-rutea manhattan siempre.
+    // Igual en layouts no jerárquicos (radial/organic): las posiciones ELK
+    // originales proceden de otro sistema, no valen.
     if (
+      this.routingMode === "manhattan" ||
       this.layoutPos ||
       this.movedTables.has(r.from) ||
       this.movedTables.has(r.to)
@@ -1110,14 +1157,22 @@ class Diagram extends MarkdownRenderChild {
     if (!this.focusBtn) return;
     const active = !!this.focus && this.focus.size > 0;
     this.focusBtn.style.display = active ? "" : "none";
-    if (this.focusLabel) {
-      const names = active
-        ? this.model.tables
-            .filter((x) => this.focus!.has(x.name))
-            .map((x) => x.name)
-        : [];
+    if (!this.focusLabel) return;
+    if (active) {
+      // modo enfoque/exploración: etiqueta informativa (no navegable)
+      this.focusLabel.classList.remove("dbml-nav");
+      const names = this.model.tables
+        .filter((x) => this.focus!.has(x.name))
+        .map((x) => x.name);
       this.focusLabel.textContent = names.length ? `<${names.join(" + ")}>` : "";
       this.focusLabel.style.display = names.length ? "" : "none";
+    } else {
+      // modo normal: etiqueta-navegador de la tabla vigilada.
+      this.focusLabel.classList.add("dbml-nav");
+      this.focusLabel.textContent = this.watchedTable
+        ? `<${this.watchedTable}>`
+        : `<${t("navPick")}>`;
+      this.focusLabel.style.display = "";
     }
   }
 
@@ -1180,6 +1235,65 @@ class Diagram extends MarkdownRenderChild {
       return;
     }
     this.fitAll();
+  }
+
+  // Menú del navegador (modo normal): lista alfabética de todas las tablas.
+  private openTableNav(anchor: Element) {
+    const menu = new Menu();
+    const names = this.model.tables
+      .map((x) => x.name)
+      .sort((a, b) => a.localeCompare(b));
+    for (const n of names) {
+      menu.addItem((item) =>
+        item
+          .setTitle(n)
+          .setDisabled(n === this.watchedTable)
+          .onClick(() => this.revealTable(n))
+      );
+    }
+    menu.showAtPosition({
+      x: anchor.getBoundingClientRect().right,
+      y: anchor.getBoundingClientRect().bottom,
+    });
+  }
+
+  // Concentra la vista en una tabla concreta SIN ocultar el resto (a diferencia
+  // del modo enfoque). Marca ".dbml-node-live" y actualiza el navegador.
+  revealTable(name: string, fit = true) {
+    if (!this.pos[name]) return;
+    this.watchedTable = name;
+    if (this.focus) {
+      // en modo enfoque no aplica: se sale a la vista completa y se concentra.
+      this.focus = null;
+      this.layoutPos = null;
+      this.saveFocusState();
+      this.closeRefPanel();
+    }
+    this.redrawNodes();
+    this.redrawEdges();
+    this.redrawHandles();
+    this.updateFocusUI();
+    if (fit) this.fitToTable(name);
+  }
+
+  // vista centrada en una sola tabla (llena la superficie disponible).
+  private fitToTable(name: string) {
+    const P = this.pos[name];
+    const r = this.svg.getBoundingClientRect();
+    if (!P || r.width === 0) return;
+    const t = this.model.tables.find((x) => x.name === name);
+    const w = P.w || NODE_W;
+    const h = P.h || HEAD_H + (t ? t.cols.length * ROW_H : 0);
+    const pad = 40;
+    const k = Math.min(
+      (r.width - pad * 2) / w,
+      (r.height - pad * 2) / h,
+      1.4
+    );
+    this.view.k = isFinite(k) && k > 0 ? k : 1;
+    this.view.x = pad - P.x * this.view.k + (r.width - pad * 2 - w * this.view.k) / 2;
+    this.view.y = pad - P.y * this.view.k;
+    this.applyView();
   }
 
   // recorta el nombre de la cabecera para que no invada los contadores.
@@ -1311,6 +1425,7 @@ class Diagram extends MarkdownRenderChild {
       const g = activeDocument.createElementNS(NS, "g");
       g.classList.add("dbml-node");
       if (this.focus) g.classList.add("dbml-node-focus");
+      if (this.watchedTable === t.name) g.classList.add("dbml-node-live");
       g.setAttribute("transform", `translate(${P.x},${P.y})`);
       // nota de tabla: tooltip nativo al pasar el ratón por la cabecera (y por
       // cualquier fila sin nota propia, ya que <title> busca el ancestro más
@@ -1836,6 +1951,19 @@ class Diagram extends MarkdownRenderChild {
   getView() {
     return { x: this.view.x, y: this.view.y, k: this.view.k };
   }
+  // true mientras el diagrama está en modo enfoque/exploración.
+  get exploring() {
+    return !!this.focus && this.focus.size > 0;
+  }
+  // re-encuadra todo el diagrama (sin persistir): usado por la ventana al
+  // cambiar de sistema de layout.
+  refit() {
+    this.fit(false);
+  }
+  // consulta pública del diagrama (la ventana la usa antes de revelar).
+  hasTable(name: string) {
+    return !!this.pos[name];
+  }
   private fit(persist = false) {
     const r = this.svg.getBoundingClientRect();
     if (r.width === 0) return;
@@ -1885,6 +2013,12 @@ class ErdWindowModal extends Modal {
   private previewTimer?: number;
   private previewToken = 0;
   private view?: { x: number; y: number; k: number };
+  // sistema de layout activo en la ventana (se persiste como `// @layout`).
+  private layoutKind: LayoutKind;
+  // última tabla revelada en vivo (cursor/seek) para reaplicarla al re-render.
+  private lastReveal: string | null = null;
+  // al cambiar de layout se re-encuadra el diagrama completo tras el render.
+  private refitNext = false;
 
   constructor(
     app: App,
@@ -1896,10 +2030,15 @@ class ErdWindowModal extends Modal {
     this.plugin = plugin;
     this.file = ref.file;
     this.lineStart = ref.lineStart;
+    this.layoutKind =
+      parseLayout(source) ??
+      this.plugin.settings.layout ??
+      DEFAULT_SETTINGS.layout;
     // el editor muestra el DBML "limpio": sin las anotaciones @pos/@view/@size/
-    // @edge que gestiona el plugin (se reinyectan al guardar).
+    // @edge/@layout que gestiona el plugin (se reinyectan al guardar).
     const lines = source.split("\n");
-    const isAnnot = (l: string) => /^\s*\/\/\s*@(pos|view|size|edge)\b/.test(l);
+    const isAnnot = (l: string) =>
+      /^\s*\/\/\s*@(pos|view|size|edge|layout)\b/.test(l);
     this.clean = lines.filter((l) => !isAnnot(l)).join("\n").replace(/\n+$/, "");
   }
 
@@ -1910,6 +2049,29 @@ class ErdWindowModal extends Modal {
 
     const head = this.contentEl.createDiv({ cls: "erd-window-head" });
     head.createSpan({ cls: "erd-window-title", text: t("windowTitle") });
+
+    // desplegable del sistema de layout (se persiste al guardar como @layout)
+    const layoutLabel = head.createSpan({
+      cls: "erd-window-layout-label",
+      text: t("layout"),
+    });
+    const layoutSel = head.createEl("select", {
+      cls: "erd-window-layout",
+    }) as HTMLSelectElement;
+    for (const k of LAYOUT_KINDS) {
+      const opt = layoutSel.createEl("option", { value: k, text: t(k) });
+      layoutSel.append(opt);
+    }
+    layoutSel.value = this.layoutKind;
+    layoutSel.addEventListener("change", () => {
+      this.layoutKind = layoutSel.value as LayoutKind;
+      // el cambio de sistema re-flota todo el diagrama desde cero
+      this.lastReveal = null;
+      this.view = undefined;
+      this.refitNext = true;
+      void this.preview();
+    });
+    layoutLabel.addEventListener("click", () => layoutSel.showPicker?.());
 
     const codeBtn = head.createEl("button", { text: t("windowCode") });
     codeBtn.classList.add("erd-window-btn", "is-active");
@@ -1943,7 +2105,12 @@ class ErdWindowModal extends Modal {
     ta.spellcheck = false;
     ta.wrap = "off";
     this.editor = ta;
-    ta.addEventListener("input", () => this.schedulePreview());
+    ta.addEventListener("input", () => {
+      this.schedulePreview();
+      this.updateLiveReveal();
+    });
+    ta.addEventListener("click", () => this.updateLiveReveal());
+    ta.addEventListener("keyup", () => this.updateLiveReveal());
     this.splitEl = split;
     this.initSplit(split, code, body);
 
@@ -1988,6 +2155,10 @@ class ErdWindowModal extends Modal {
     this.setCodeOpen(true);
     ed.focus();
     ed.setSelectionRange(index, index + (col ?? table).length);
+    // revela la tabla buscada en el diagrama (solo en modo normal)
+    this.lastReveal = table;
+    const d = this.diagram;
+    if (d && !d.exploring && d.hasTable(table)) d.revealTable(table, true);
     // desplazar la línea objetivo a ~1/3 de la altura visible
     const lh = parseFloat(getComputedStyle(ed).lineHeight) || 18;
     const line = ed.value.slice(0, index).split("\n").length - 1;
@@ -1997,6 +2168,53 @@ class ErdWindowModal extends Modal {
   private schedulePreview() {
     if (this.previewTimer) activeWindow.clearTimeout(this.previewTimer);
     this.previewTimer = activeWindow.setTimeout(() => void this.preview(), 400);
+  }
+
+  // reveal en vivo: la tabla cuyo bloque de código contiene el cursor se
+  // concentra/resalta en el diagrama de la izquierda SIN entrar en modo
+  // enfoque (el resto de tablas permanece visible).
+  private updateLiveReveal() {
+    const t = this.tableAtCaret();
+    if (t && t !== this.lastReveal) {
+      this.lastReveal = t;
+      const d = this.diagram;
+      if (d && !d.exploring && d.hasTable(t)) d.revealTable(t, true);
+    }
+  }
+
+  // nombre de la tabla cuyo bloque `Table x { ... }` contiene el cursor.
+  private tableAtCaret(): string | null {
+    const ed = this.editor;
+    if (!ed) return null;
+    const value = ed.value;
+    const sel = ed.selectionStart ?? 0;
+    if (sel < 0 || sel > value.length) return null;
+    const lineOf = (idx: number) => {
+      const str = value.slice(0, idx);
+      return (str.match(/\n/g) ?? []).length + 1;
+    };
+    const caretLine = lineOf(sel);
+    let found: string | null = null;
+    const re = /^\s*Table\s+([A-Za-z0-9_]+)\s*\{/gm;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(value))) {
+      const startLine = lineOf(m.index);
+      if (startLine > caretLine) break;
+      // cierre `}` a la profundidad de este bloque (los `{` de la tabla)
+      let depth = 0;
+      let i = m.index;
+      for (; i < value.length; i++) {
+        const ch = value[i];
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+          depth--;
+          if (depth === 0) break;
+        }
+      }
+      if (i >= value.length) continue; // bloque sin cerrar: se ignora
+      if (caretLine <= lineOf(i)) found = m[1];
+    }
+    return found;
   }
 
   private async preview() {
@@ -2029,7 +2247,7 @@ class ErdWindowModal extends Modal {
         host.createDiv({ cls: "dbml-erd-wrap", text: t("noTables") });
         return;
       }
-      const layout = await this.plugin.layoutFor(src, model);
+      const layout = await this.plugin.layoutFor(src, model, this.layoutKind);
       if (stale()) return;
       // copia defensiva: el Diagram mueve/edita nodos y no queremos tocar la
       // caché compartida de layouts.
@@ -2038,7 +2256,7 @@ class ErdWindowModal extends Modal {
       this.diagram = new Diagram(
         host,
         model,
-        { nodes, edges: layout.edges },
+        { nodes, edges: layout.edges, routes: layout.routes },
         {
           plugin: this.plugin,
           window: true,
@@ -2046,9 +2264,24 @@ class ErdWindowModal extends Modal {
           view: view ?? parseView(src) ?? undefined,
           size: parseSize(src) ?? undefined,
           savedEdges: parseEdges(src),
+          layout: this.layoutKind,
           onJump: (table, col) => this.jumpTo(table, col),
         }
       );
+      // tras un re-render (cambio de layout o edición) se mantiene la última
+      // tabla revelada en vivo
+      if (
+        this.lastReveal &&
+        this.diagram &&
+        !this.diagram.exploring &&
+        this.diagram.hasTable(this.lastReveal)
+      ) {
+        this.diagram.revealTable(this.lastReveal, true);
+      }
+      if (this.refitNext) {
+        this.refitNext = false;
+        this.diagram?.refit();
+      }
     } catch (e) {
       if (stale()) return;
       host.createDiv({
@@ -2059,10 +2292,11 @@ class ErdWindowModal extends Modal {
   }
 
   // escribe el código editado de vuelta en el bloque, conservando las
-  // anotaciones @pos/@view/@size/@edge del plugin que hubiera en el archivo.
+  // anotaciones del plugin (@pos/@view/@size/@edge/@layout) del archivo.
   private async save() {
     if (!this.editor) return;
-    const isAnnot = (l: string) => /^\s*\/\/\s*@(pos|view|size|edge)\b/.test(l);
+    const isAnnot = (l: string) =>
+      /^\s*\/\/\s*@(pos|view|size|edge|layout)\b/.test(l);
     let ok = true;
     await this.plugin.app.vault.process(this.file, (data) => {
       const lines = data.split("\n");
@@ -2073,11 +2307,21 @@ class ErdWindowModal extends Modal {
       }
       const [open, close] = range;
       const annots = lines.slice(open + 1, close).filter(isAnnot);
+      // la línea `@layout` se mantiene actualizada con el desplegable (una sola)
+      let layoutWritten = false;
+      const next = annots.map((l) => {
+        if (/^\s*\/\/\s*@layout\b/.test(l)) {
+          layoutWritten = true;
+          return `// @layout ${this.layoutKind}`;
+        }
+        return l;
+      });
+      if (!layoutWritten) next.unshift(layoutLine(this.layoutKind));
       const body = this.editor!.value.replace(/\n+$/, "").split("\n");
       return [
         ...lines.slice(0, open + 1),
         ...body,
-        ...annots,
+        ...next,
         lines[close],
         ...lines.slice(close + 1),
       ].join("\n");
@@ -2245,6 +2489,16 @@ class DbmlErdSettingTab extends PluginSettingTab {
           this.plugin.settings.lang = v as Lang;
           await this.plugin.saveSettings();
           this.display(); // re-render the tab in the new language
+        });
+      });
+    new Setting(containerEl)
+      .setName(t("settingsLayout"))
+      .setDesc(t("settingsLayoutDesc"))
+      .addDropdown((dd) => {
+        for (const k of LAYOUT_KINDS) dd.addOption(k, t(k));
+        dd.setValue(this.plugin.settings.layout).onChange(async (v) => {
+          this.plugin.settings.layout = v as LayoutKind;
+          await this.plugin.saveSettings();
         });
       });
   }

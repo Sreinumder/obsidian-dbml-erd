@@ -1,12 +1,12 @@
-// Layout con elkjs: posiciona tablas (layered) y rutea aristas ortogonalmente
-// conectándolas a puertos ubicados en la fila de cada columna.
+// Layout: elkjs (layered / stress) para nodos y el router ortogonal propio del
+// Diagram para las variantes no jerárquicas (radial/organic).
 import type {
   ELK as ElkInstance,
   ElkNode,
   ElkPort,
   ElkExtendedEdge,
 } from "elkjs/lib/elk-api";
-import type { Model } from "./parser";
+import type { LayoutKind, Model } from "./parser";
 
 export const ROW_H = 28;
 export const HEAD_H = 36;
@@ -23,11 +23,14 @@ export interface NodePos {
   h: number;
 }
 export interface EdgePath {
-  pts: Pt[]; // polilínea ruteada por ELK (coords absolutas)
+  pts: Pt[]; // polilínea ruteada (coords absolutas)
 }
 export interface LayoutResult {
   nodes: Record<string, NodePos>;
   edges: EdgePath[]; // mismo orden que model.refs
+  // "elk" = las aristas vienen ruteadas por ELK (jerárquico);
+  // "manhattan" = el Diagram las rutea con su router ortogonal de 90°.
+  routes: "elk" | "manhattan";
 }
 
 // ELK (~1.6 MB) se carga perezosamente en el primer layout: el import()
@@ -54,7 +57,20 @@ function colRowY(model: Model, table: string, col: string): number {
   return HEAD_H + idx * ROW_H + ROW_H / 2;
 }
 
-export async function computeLayout(model: Model): Promise<LayoutResult> {
+export async function computeLayout(
+  model: Model,
+  kind: LayoutKind = "layered-lr"
+): Promise<LayoutResult> {
+  // variantes no jerárquicas: solo posicionan nodos; las aristas las rutea el
+  // propio Diagram de forma ortogonal (routes: "manhattan").
+  if (kind === "radial") {
+    return { nodes: radialNodes(model), edges: model.refs.map(() => ({ pts: [] })), routes: "manhattan" };
+  }
+  if (kind === "organic") {
+    const nodes = await stressNodes(model);
+    return { nodes, edges: model.refs.map(() => ({ pts: [] })), routes: "manhattan" };
+  }
+
   const children: ElkNode[] = model.tables.map((t) => {
     const h = tableHeight(t.cols.length);
     const ports: ElkPort[] = [];
@@ -90,7 +106,7 @@ export async function computeLayout(model: Model): Promise<LayoutResult> {
     id: "root",
     layoutOptions: {
       "elk.algorithm": "layered",
-      "elk.direction": "RIGHT",
+      "elk.direction": kind === "layered-tb" ? "DOWN" : "RIGHT",
       "elk.edgeRouting": "ORTHOGONAL",
       "elk.layered.spacing.nodeNodeBetweenLayers": "120",
       "elk.spacing.nodeNode": "50",
@@ -123,7 +139,7 @@ export async function computeLayout(model: Model): Promise<LayoutResult> {
   const edgePaths: EdgePath[] = model.refs.map((_, i) => ({
     pts: byId["e" + i] ?? [],
   }));
-  return { nodes, edges: edgePaths };
+  return { nodes, edges: edgePaths, routes: "elk" };
 }
 
 function port(id: string, x: number, y: number, side: string): ElkPort {
@@ -135,4 +151,84 @@ function port(id: string, x: number, y: number, side: string): ElkPort {
     height: 1,
     layoutOptions: { "elk.port.side": side },
   };
+}
+
+// Lay-out "radial"/circular determinista: tablas repartidas en un anillo ÚNICO
+// alrededor del origen (orientación "esférica" compacta). El radio se calcula
+// para que la cuerda entre centros consecutivos no solape los anchos; 1 tabla
+// se centra y 2 se colocan a izquierda/derecha. El ELK "radial" nativo exige
+// un grafo en árbol (los ERD son cíclicos), por eso es propio.
+function radialNodes(model: Model): Record<string, NodePos> {
+  const out: Record<string, NodePos> = {};
+  const tables = model.tables;
+  const n = tables.length;
+  if (n === 0) return out;
+  for (const t of tables) {
+    out[t.name] = {
+      x: 0,
+      y: 0,
+      w: NODE_W,
+      h: tableHeight(t.cols.length),
+    };
+  }
+  if (n === 1) return out;
+  if (n === 2) {
+    const gap = 120;
+    const a = out[tables[0].name];
+    const b = out[tables[1].name];
+    a.x = 0;
+    a.y = 0;
+    b.x = a.w + gap;
+    b.y = 0;
+    return out;
+  }
+  // cuerda entre centros adyacentes ~ ancho de tabla + margen
+  const chord = NODE_W + 70;
+  const r = Math.max(200, chord / (2 * Math.sin(Math.PI / n)));
+  const cx = 0,
+    cy = 0;
+  tables.forEach((t, i) => {
+    const ang = (i / n) * Math.PI * 2 - Math.PI / 2;
+    const p = out[t.name];
+    p.x = cx + Math.cos(ang) * r - p.w / 2;
+    p.y = cy + Math.sin(ang) * r - p.h / 2;
+  });
+  return out;
+}
+
+// Lay-out "organic" con ELK stress (apegometría basada en fuerzas; admite
+// grafos cíclicos). Solo posiciones de nodos; las aristas se rutean luego.
+async function stressNodes(model: Model): Promise<Record<string, NodePos>> {
+  const children: ElkNode[] = model.tables.map((t) => ({
+    id: t.name,
+    width: NODE_W,
+    height: tableHeight(t.cols.length),
+  }));
+  const elkEdges: ElkExtendedEdge[] = model.refs.map((r, i) => ({
+    id: "e" + i,
+    sources: [r.from],
+    targets: [r.to],
+  }));
+  const res = await (
+    await getElk()
+  ).layout({
+    id: "root",
+    layoutOptions: {
+      "elk.algorithm": "stress",
+      "elk.stress.desiredEdgeLength": "120",
+    },
+    children,
+    edges: elkEdges,
+  });
+  const nodes: Record<string, NodePos> = {};
+  for (const t of model.tables) {
+    const n = (res.children ?? []).find((x) => x.id === t.name);
+    nodes[t.name] = {
+      x: n?.x ?? 0,
+      y: n?.y ?? 0,
+      w: NODE_W,
+      h: tableHeight(t.cols.length),
+    };
+  }
+  return nodes;
 }

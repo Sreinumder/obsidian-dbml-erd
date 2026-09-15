@@ -520,6 +520,28 @@ export function setRefOpInBlock(
 
 // ---- posiciones / vista persistidas como comentarios ----
 
+// Sistemas de layout disponibles (elegibles desde el desplegable y persistidos
+// por bloque como `// @layout <kind>`).
+export type LayoutKind = "layered-lr" | "layered-tb" | "radial" | "organic";
+
+export const LAYOUT_KINDS: LayoutKind[] = [
+  "layered-lr",
+  "layered-tb",
+  "radial",
+  "organic",
+];
+
+export function parseLayout(src: string): LayoutKind | undefined {
+  const m = src.match(/\/\/\s*@layout\s+([A-Za-z0-9_-]+)/);
+  if (!m) return undefined;
+  const kind = m[1] as LayoutKind;
+  return LAYOUT_KINDS.includes(kind) ? kind : undefined;
+}
+
+export function layoutLine(kind: LayoutKind): string {
+  return `// @layout ${kind}`;
+}
+
 export function parsePositions(
   src: string
 ): Record<string, { x: number; y: number }> {

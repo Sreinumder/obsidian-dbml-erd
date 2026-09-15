@@ -173,11 +173,26 @@
   background: var(--background-primary);
   user-select: none;
 }
+/* en modo normal actúa de navegador (clic = menú de tablas) */
+.dbml-focus-label.dbml-nav {
+  cursor: pointer;
+}
+.dbml-focus-label.dbml-nav:hover {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+}
 
 /* tabla enfocada (modo enfoque) */
 .dbml-node-focus .dbml-body {
   stroke: var(--interactive-accent);
   stroke-width: 2.5;
+}
+
+/* tabla revelada en vivo (modo normal): resaltado discontinuo */
+.dbml-node-live .dbml-body {
+  stroke: var(--text-accent);
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
 }
 
 /* contadores de referencias en la cabecera */
@@ -304,6 +319,21 @@
 .erd-window-title {
   margin-right: auto;
   font-weight: 700;
+}
+/* desplegable del sistema de layout en la cabecera de la ventana */
+.erd-window-layout-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  user-select: none;
+}
+.erd-window-layout {
+  max-width: 220px;
+  padding: 4px 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 12px;
 }
 .erd-window-btn {
   padding: 4px 12px;
