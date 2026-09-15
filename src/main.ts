@@ -213,7 +213,11 @@ class Diagram extends MarkdownRenderChild {
   // El encuadre del diagrama completo (fit) puede bajar de 25%: es voluntario.
   private static readonly MIN_ZOOM = 0.25;
   private static readonly MAX_ZOOM = 4;
-  // px de tabla que deben seguir visibles en el marco aunque se arrastre todo.
+  // fracción máxima del viewport que puede quedar VACÍA al arrastrar (el resto
+  // de espacio "fuera del diagrama" en pantalla no debe pasar de ~30%).
+  private static readonly MAX_EMPTY = 0.3;
+  // suelo en px de tabla que debe seguir visible en cada eje si el diagrama es
+  // tan pequeño que ni siquiera un 30% de vacío es suficiente para perderlo.
   private static readonly KEEP_VISIBLE = 40;
   private model: Model;
   private pos: Record<string, NodePos>;
@@ -2737,32 +2741,44 @@ class Diagram extends MarkdownRenderChild {
     return any ? { minX, minY, maxX, maxY } : null;
   }
 
-  // impide arrastrar el lienzo "hasta el infinito": siempre quedan al menos
-  // KEEP_VISIBLE px de tabla en pantalla en cada eje. No restringe el zoom.
+// impide arrastrar el lienzo "hasta el infinito": al arrastrar hacia un lado
+// solo se permite ver un "vacío" de hasta ~30% del viewport por ese eje (suelo
+// de KEEP_VISIBLE px cuando el diagrama es pequeño); nunca se pierde el ERD.
   private clampView() {
     const b = this.contentBounds();
     if (!b) return;
     const r = this.svg.getBoundingClientRect();
     if (r.width === 0 || r.height === 0) return;
     const k = this.view.k;
-    const keep = Diagram.KEEP_VISIBLE;
-    const vw = r.width / k;
-    const vh = r.height / k;
-    // rango permitido del borde izdo/sup del viewport (en coordenadas de mundo).
-    // Cuando el contenido cabe sobrado (rango vacío) no se hace nada para no
-    // "sacar" la cámara de donde estaba.
-    const loX = b.minX - vw + keep;
-    const hiX = b.maxX - keep;
-    if (hiX >= loX) {
-      const vL = -this.view.x / k;
-      this.view.x = -Math.min(Math.max(vL, loX), hiX) * k;
+    this.clampAxis("x", r.width / k, b.minX, b.maxX);
+    this.clampAxis("y", r.height / k, b.minY, b.maxY);
+  }
+
+  // encuadra el borde de inicio del viewport (v0 = -view.{x|y}/vw) en [lo, hi]:
+  //  - rango 30%: deja como máximo un vacío de ~30% del viewport por ese lado
+  //    (lo = cMin - E, hi = cMax - vw + E);
+  //  - si el diagrama es tan pequeño que ese rango se invierte, se cae al suelo
+  //    "mantener visible": siempre queda al menos KEEP_VISIBLE px de contenido;
+  //  - con un contenido más ancho que el viewport no hay vacío y no se toca nada.
+  private clampAxis(
+    axis: "x" | "y",
+    vw: number,
+    cMin: number,
+    cMax: number
+  ) {
+    const E = Math.max(Diagram.MAX_EMPTY * vw, Diagram.KEEP_VISIBLE);
+    let lo = cMin - E;
+    let hi = cMax - vw + E;
+    if (hi < lo) {
+      // diagrama pequeño en un viewport grande: usar el suelo de visibilidad
+      lo = cMin - vw + Diagram.KEEP_VISIBLE;
+      hi = cMax - Diagram.KEEP_VISIBLE;
     }
-    const loY = b.minY - vh + keep;
-    const hiY = b.maxY - keep;
-    if (hiY >= loY) {
-      const vT = -this.view.y / k;
-      this.view.y = -Math.min(Math.max(vT, loY), hiY) * k;
-    }
+    if (hi < lo) return; // contenido más ancho que el viewport: no hay vacío
+    const v0 = axis === "x" ? -this.view.x / vw : -this.view.y / vw;
+    const c0 = Math.min(Math.max(v0, lo), hi);
+    if (axis === "x") this.view.x = -c0 * vw;
+    else this.view.y = -c0 * vw;
   }
 
   private applyView() {

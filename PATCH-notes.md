@@ -425,8 +425,10 @@ single consistent scheme and adds a redesigned table navigator.
   preset menu) is clamped to the same range as the preset menu; only the
   full-diagram `fit` may go below 25% (deliberate).
 - **No infinite canvas dragging.** `applyView()` now runs `clampView()`: the
-  viewport is constrained so at least 40 px of table stays visible on each
-  axis — you can never pan the whole diagram out of the frame.
+  amount of *empty* space beyond the diagram that panning can reveal is capped
+  at ~30% of the viewport per axis (per-side), with a 40 px floor so the content
+  can never fully leave the frame; diagrams wider than the viewport have no
+  void and are panned freely.
 - **Watch zoom floor of 75%.** If the current zoom is below 75%, watching a
   table jumps to 100% and centres it (`centerCameraOn`); at 75% or above the
   normal minimal-pan rule applies (keep your zoom).
