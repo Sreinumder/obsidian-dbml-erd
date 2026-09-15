@@ -451,6 +451,10 @@ single consistent scheme and adds a redesigned table navigator.
   of restarting with the single watched/first table. "Quitar todas" clears the
   memory (passes `fitAll(false)`), as does unfocusing the last table one by one
   — those start fresh next time.
+- **Middle-clicking a table from normal mode adds, never clears.** Entering
+  focus from normal mode via a middle-click (or the dropdown `+`) seeds the
+  focus set from `lastFocusTables` and *adds* the clicked table, so the
+  previously focused set survives; it is not replaced by a single-table mode.
 
 ## Files changed vs upstream
 

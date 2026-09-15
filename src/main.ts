@@ -1527,7 +1527,16 @@ class Diagram extends MarkdownRenderChild {
       this.applyFocusView();
       return;
     }
-    if (!this.focus) this.focus = new Set<string>();
+    if (!this.focus) {
+      // entrando desde el modo normal: NO se empieza de cero. Se regenera el
+      // conjunto que tenías enfocado la última vez (lastFocusTables) y se le
+      // AÑADE esta tabla: el clic medio nunca descarta el modo anterior.
+      this.focus = new Set(
+        this.lastFocusTables && this.lastFocusTables.length
+          ? this.lastFocusTables
+          : []
+      );
+    }
     this.focus.add(name);
     this.saveFocusState();
     this.applyFocusView(entering);
