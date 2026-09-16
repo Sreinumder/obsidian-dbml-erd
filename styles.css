@@ -395,15 +395,16 @@
   border-color: var(--interactive-accent);
 }
 
-/* tabla enfocada (modo enfoque): borde naranja grueso y sólido */
+/* tabla enfocada (modo enfoque): sutil - solo marca que pertenece al
+   subconjunto en foco; NO compite con el naranja de la vigilada. */
 .dbml-node-focus .dbml-body {
-  stroke: #ff8c1a;
-  stroke-width: 4;
-  fill: color-mix(in srgb, #ff8c1a 6%, transparent);
-  filter: drop-shadow(0 0 5px rgba(255, 140, 26, 0.55));
+  stroke: var(--background-modifier-border);
+  stroke-width: 1.5;
+  fill: color-mix(in srgb, var(--background-modifier-border) 8%, transparent);
 }
 
-/* tabla revelada en vivo (modo normal): borde naranja grueso y sólido */
+/* tabla revelada en vivo (modo normal, y también la vigilada dentro del modo
+   enfoque): borde naranja grueso y sólido = la que se está vigilando. */
 .dbml-node-live .dbml-body {
   stroke: #ff8c1a;
   stroke-width: 4;
