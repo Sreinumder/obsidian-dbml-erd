@@ -243,6 +243,19 @@ class Diagram extends MarkdownRenderChild {
   }
   private view = { x: 30, y: 30, k: 1 };
   private movedTables = new Set<string>();
+  // tablas "minimizadas": se renderizan como una sola fila (solo la cabecera,
+  // sin propiedades) y todas sus referencias se anclan al centro de la cabecera
+  // (una "propiedad invisible"). El sistema de render "finge" que no tiene
+  // columnas en absoluto.
+  private minimized = new Set<string>();
+  // posiciones tras plegar el espacio que cada tabla minimizada libera (su
+
+  // altura sobrante): los bloques de la misma banda vertical suben, de modo que
+  // el diagrama se compacta naturalmente al minimizar. null = sin minimizadas.
+  private compactPos: Record<
+    string,
+    { x: number; y: number; w: number; h: number }
+  > | null = null;
   private saveTimer = 0;
   private hostEl?: HTMLElement;
   private lastSize = "";
@@ -394,6 +407,7 @@ class Diagram extends MarkdownRenderChild {
       if (savedFocus && savedFocus.length) {
         this.focus = new Set(savedFocus);
         this.layoutPos = this.layoutCompact(this.focus);
+        this.rebuildFold();
       }
     }
 
@@ -558,9 +572,74 @@ class Diagram extends MarkdownRenderChild {
   }
 
   // posición efectiva: en modo enfoque se usa el arreglo compacto (layoutPos),
-  // que se ignora la posición/orientación original; fuera de él, this.pos.
+  // que se ignora la posición/orientación original; fuera de él, this.pos. Si
+  // hay tablas minimizadas, se devuelve la posición plegada (compactPos), que
+  // reutiliza esas bases y solo sube las filas bajo el espacio liberado.
   private px(name: string) {
+    if (this.compactPos) {
+      const c = this.compactPos[name];
+      if (c) return c;
+    }
     return this.layoutPos ? this.layoutPos[name] ?? this.pos[name] : this.pos[name];
+  }
+
+  // altura efectiva que ocupa la tabla en pantalla: una minimizada es solo la
+  // cabecera (el render "finge" que no tiene propiedades).
+  private effH(t: { name: string; cols: { name: string }[] }): number {
+    return HEAD_H + (this.isMinimized(t.name) ? 0 : t.cols.length) * ROW_H;
+  }
+
+  private isMinimized(name: string) {
+    return this.minimized.has(name);
+  }
+
+  // Recalcula compactPos. Con ninguna tabla minimizada queda null (render y
+  // posiciones idénticos al diagrama normal). Con minimizadas, cada una libera
+  // su altura sobrante (H_fila × nº properties): las tablas de la misma banda
+  // vertical (solape en X) que están "debajo" suben ese espacio, acercando todo
+  // sin cambiar el orden ni las columnas — nunca se re-layouta.
+  private rebuildFold() {
+    const base = this.layoutPos ?? this.pos;
+    this.compactPos = null;
+    if (this.minimized.size === 0) return;
+    const out: Record<
+      string,
+      { x: number; y: number; w: number; h: number }
+    > = {};
+    for (const t of this.model.tables) {
+      const p = base[t.name];
+      if (!p) continue;
+      const min = this.isMinimized(t.name);
+      const h = this.effH(t);
+      let y = p.y;
+      if (!min) {
+        let dy = 0;
+        for (const m of this.model.tables) {
+          if (!this.isMinimized(m.name)) continue;
+          const mp = base[m.name];
+          if (!mp) continue;
+          const overlapX =
+            p.x < mp.x + NODE_W && p.x + NODE_W > mp.x;
+          if (mp.y + HEAD_H <= p.y + 1e-6 && overlapX)
+            dy += HEAD_H + m.cols.length * ROW_H - HEAD_H;
+        }
+        y = p.y - dy;
+      }
+      out[t.name] = { x: p.x, y, w: NODE_W, h };
+    }
+    this.compactPos = out;
+  }
+
+  // minimiza/expande una tabla: solo cabecera (sin propiedades), referencias
+  // ancladas al centro de la cabecera. Al ser una sola fila, el diagrama se
+  // compacta solo (rebuildFold acerca las filas del espacio liberado).
+  private toggleMin(name: string) {
+    if (this.minimized.has(name)) this.minimized.delete(name);
+    else this.minimized.add(name);
+    this.rebuildFold();
+    this.redrawNodes();
+    this.redrawEdges();
+    this.redrawHandles();
   }
 
   // abre el diagrama en un overlay a pantalla completa (ErdWindowModal), con el
@@ -607,6 +686,9 @@ class Diagram extends MarkdownRenderChild {
 
   // ---- geometría ----
   private colRowY(table: string, col: string): number {
+    // minimizada: todas las referencias aterrizan en el centro de la cabecera
+    // (la "propiedad invisible" del render sin columnas).
+    if (this.isMinimized(table)) return HEAD_H / 2;
     const t = this.model.tables.find((t) => t.name === table);
     if (!t) return HEAD_H / 2;
     const i = t.cols.findIndex((c) => c.name === col);
@@ -632,7 +714,9 @@ class Diagram extends MarkdownRenderChild {
         x: p.x,
         y: p.y,
         w: p.w || NODE_W,
-        h: p.h || HEAD_H + t.cols.length * ROW_H,
+        h: this.isMinimized(t.name)
+          ? HEAD_H
+          : p.h || HEAD_H + t.cols.length * ROW_H,
       });
     }
     return out;
@@ -828,7 +912,9 @@ class Diagram extends MarkdownRenderChild {
       this.routingMode === "manhattan" ||
       this.layoutPos ||
       this.movedTables.has(r.from) ||
-      this.movedTables.has(r.to)
+      this.movedTables.has(r.to) ||
+      this.isMinimized(r.from) ||
+      this.isMinimized(r.to)
     ) {
       const m = this.manhattan(r);
       return m ? m.pts : null;
@@ -1567,6 +1653,7 @@ class Diagram extends MarkdownRenderChild {
     }
     this.closeRefPanel();
     this.layoutPos = this.layoutCompact(this.focus ?? new Set<string>());
+    this.rebuildFold();
     this.redrawNodes();
     this.redrawEdges();
     this.redrawHandles();
@@ -1695,6 +1782,7 @@ class Diagram extends MarkdownRenderChild {
     this.focus = null;
     this.closeRefPanel();
     this.layoutPos = null; // descarta el arreglo compacto
+    this.rebuildFold();
     if (hadFocus) {
       this.endHoverWatch();
       this.saveFocusState();
@@ -1733,6 +1821,7 @@ class Diagram extends MarkdownRenderChild {
     if (this.focus && !this.focus.has(name)) {
       this.focus.add(name);
       this.layoutPos = this.layoutCompact(this.focus);
+      this.rebuildFold();
       this.saveFocusState();
       void this.reflowFocus();
     }
@@ -1868,6 +1957,7 @@ class Diagram extends MarkdownRenderChild {
       map[k] = { x: n.x - minX + off, y: n.y - minY + off, w: n.w, h: n.h };
     }
     this.layoutPos = map;
+    this.rebuildFold();
     this.redrawNodes();
     this.redrawEdges();
     this.redrawHandles();
@@ -2064,6 +2154,8 @@ class Diagram extends MarkdownRenderChild {
       if (this.watchedTable === t.name) g.classList.add("dbml-node-live");
       g.setAttribute("transform", `translate(${P.x},${P.y})`);
       g.setAttribute("data-table", t.name);
+      const min = this.isMinimized(t.name);
+      if (min) g.classList.add("dbml-node-min");
       // nota de tabla: tooltip nativo al pasar el ratón por la cabecera (y por
       // cualquier fila sin nota propia, ya que <title> busca el ancestro más
       // cercano con tooltip).
@@ -2072,7 +2164,9 @@ class Diagram extends MarkdownRenderChild {
         tt.textContent = t.note;
         g.appendChild(tt);
       }
-      const h = HEAD_H + t.cols.length * ROW_H;
+      // minimizada: solo la cabecera (una sola fila) — el render "finge" que la
+      // tabla no tiene propiedades.
+      const h = this.effH(t);
 
       const body = this.rect(0, 0, NODE_W, h, "dbml-body");
       body.setAttribute("rx", "6");
@@ -2088,8 +2182,11 @@ class Diagram extends MarkdownRenderChild {
       const badgeW = (n: number) =>
         n > 0 ? 14 + (1 + String(n).length) * 8 + 4 : 0;
       const reserve = badgeW(outN) + badgeW(inN) + 6;
-      const shown = this.fitToPx(t.name, NODE_W - 14 - reserve);
-      const headTxt = this.text(14, HEAD_H / 2 + 4, shown, "dbml-head-txt");
+      // margen izquierdo: el botón de minimizar (interactivo) ocupa los primeros
+      // px de la cabecera, así el nombre arranca después.
+      const nameX = this.interactive ? 31 : 14;
+      const shown = this.fitToPx(t.name, NODE_W - nameX - reserve);
+      const headTxt = this.text(nameX, HEAD_H / 2 + 4, shown, "dbml-head-txt");
       if (shown !== t.name) {
         const tt = activeDocument.createElementNS(NS, "title");
         tt.textContent = t.name;
@@ -2104,7 +2201,33 @@ class Diagram extends MarkdownRenderChild {
       }
       this.drawRefBadges(g, t.name, outN, inN);
 
-      t.cols.forEach((c, i) => {
+      // botón de minimizar (solo ventana interactiva): pliega la tabla a una
+      // sola fila (cabecera) y viceversa. Captura el pointerdown para que no
+      // inicie el arrastre de la tabla ni el pan del lienzo.
+      if (this.interactive) {
+        const minBtn = activeDocument.createElementNS(NS, "g");
+        minBtn.classList.add("dbml-fold-btn");
+        const tt = activeDocument.createElementNS(NS, "title");
+        tt.textContent = min
+          ? "Expandir propiedades de la tabla"
+          : "Minimizar tabla (ocultar propiedades)";
+        minBtn.appendChild(tt);
+        const bg = this.rect(7, 8, 16, HEAD_H - 16, "dbml-fold-btn-bg");
+        bg.setAttribute("rx", "4");
+        minBtn.appendChild(bg);
+        const gl = this.text(15, HEAD_H / 2 + 4, min ? "▴" : "▾", "dbml-fold-btn-txt");
+        gl.setAttribute("text-anchor", "middle");
+        minBtn.appendChild(gl);
+        g.appendChild(minBtn);
+        minBtn.addEventListener("pointerdown", (ev: PointerEvent) => {
+          ev.stopPropagation();
+          ev.preventDefault();
+          if (ev.button === 0) this.toggleMin(t.name);
+        });
+      }
+
+      if (!min)
+        t.cols.forEach((c, i) => {
         // grupo por fila: su <title> convierte el hover de toda la columna en
         // el tooltip de su nota (el ancestro más cercano gana sobre la tabla).
         const cg = activeDocument.createElementNS(NS, "g");
@@ -2181,7 +2304,7 @@ class Diagram extends MarkdownRenderChild {
         const ty = this.text(rightX, y, c.type, "dbml-type");
         ty.setAttribute("data-col", String(i));
         cg.appendChild(ty);
-      });
+        });
 
       if (this.interactive) this.enableDrag(g, t.name);
       this.nodeLayer.appendChild(g);
@@ -2391,8 +2514,9 @@ class Diagram extends MarkdownRenderChild {
       sx = ev.clientX;
       sy = ev.clientY;
       // en modo enfoque se arrastra la disposición compacta (layoutPos); fuera,
-      // la posición original persistida (this.pos).
-      const target = this.layoutPos ? this.layoutPos[name] : this.pos[name];
+      // la posición original persistida (this.pos). Con minimizadas, el origen
+      // visible es el plegado (compactPos).
+      const target = this.px(name);
       ox = target?.x ?? 0;
       oy = target?.y ?? 0;
       if (!letPan) {
@@ -2415,6 +2539,11 @@ class Diagram extends MarkdownRenderChild {
         if (!P) return;
         P.x = ox + (e.clientX - sx) / this.view.k;
         P.y = oy + (e.clientY - sy) / this.view.k;
+        // mantiene el plegado al día para que las aristas anclen donde se ve
+        if (this.compactPos && this.compactPos[name]) {
+          this.compactPos[name].x = P.x;
+          this.compactPos[name].y = P.y;
+        }
         g.setAttribute("transform", `translate(${P.x},${P.y})`);
         this.redrawEdges();
       };

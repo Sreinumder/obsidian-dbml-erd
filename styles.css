@@ -438,6 +438,34 @@
   fill: var(--text-accent);
 }
 
+/* botón de minimizar/expandir tabla (solo cabecera, sin propiedades) */
+.dbml-fold-btn {
+  cursor: pointer;
+}
+.dbml-fold-btn-bg {
+  fill: transparent;
+  stroke: var(--background-modifier-border);
+  stroke-width: 1;
+  pointer-events: all;
+}
+.dbml-fold-btn:hover .dbml-fold-btn-bg {
+  fill: var(--background-modifier-hover);
+  stroke: var(--text-accent);
+}
+.dbml-fold-btn-txt {
+  fill: currentColor;
+  opacity: 0.7;
+  font-size: 11px;
+  pointer-events: none;
+}
+.dbml-fold-btn:hover .dbml-fold-btn-txt {
+  opacity: 1;
+}
+/* tabla minimizada: apagada levemente (solo queda la cabecera) */
+.dbml-node-min .dbml-head-txt {
+  font-weight: 600;
+}
+
 /* panel de referencias (lista entrantes/salientes) */
 .dbml-refpanel {
   position: absolute;

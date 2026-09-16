@@ -467,6 +467,32 @@ single consistent scheme and adds a redesigned table navigator.
   focus set from `lastFocusTables` and *adds* the clicked table, so the
   previously focused set survives; it is not replaced by a single-table mode.
 
+### 12. Minimized tables: header-only rows, arrows to the header (branch `feat/focus-and-ref-ui`)
+
+The blob/`BLOB_*` experiment is fully removed and the render system is back to
+the clean default. In its place, a table can be **minimized** to a single row:
+- **Only the class name + header are drawn; the column properties disappear.**
+  The renderer "pretends" the table has no properties at all (`effH` = `HEAD_H`
+  instead of `HEAD_H + cols*ROW_H`), so minimized tables are exactly as tall as
+  a table with zero rows.
+- **All incoming/outgoing arrows attach to the center of the header.** For a
+  minimized table, `colRowY` returns `HEAD_H/2` for *every* column — the "invisible
+  property" — so edges anchor to one point on the header and route manhattan
+  (`edgePts` forces it when either endpoint is minimized).
+- **They naturally come closer.** Minimize never re-runs the layout (that was the
+  broken-blob path). Instead `rebuildFold()`/`compactPos` *folds* the freed
+  height: tables in the same vertical band that sit below a minimized one move
+  up by `cols*ROW_H`. With all tables minimized everything packs to single rows
+  crowded together; expand one and the rows below it slide back down. Width and
+  column order never change, and with zero minimized tables `compactPos` is
+  `null`, so rendering/positions are byte-identical to the un-patched diagram.
+- **Toggle:** a `▾/▴` button on the header (left of the name, window mode only)
+  minimizes/expands the table; pointerdown is captured so it neither drags the
+  table nor pans the canvas. The `dbml-min`/`dbml-fold-*` styles live in
+  `styles.css`.
+- **Drag stays correct on compacted positions** (drag origin = `px()`, and the
+  fold is kept in sync so edges anchor where the table is drawn).
+
 ## Files changed vs upstream
 
 | File | Change |
