@@ -492,6 +492,15 @@ the clean default. In its place, a table can be **minimized** to a single row:
   `styles.css`.
 - **Drag stays correct on compacted positions** (drag origin = `px()`, and the
   fold is kept in sync so edges anchor where the table is drawn).
+- **Fold is cumulative.** Every row in the band (minimized or not) below
+  minimized tables slides up by the freed height of *all* minimized tables above
+  it, so stacking a second minimized table above never lets the middle one
+  overlap the full table below — the gaps and order are preserved exactly like
+  a re-layout with zero columns would.
+- **`//height:` / `//canvas-height:` in the DBML is ignored** (the canvas uses
+  its default CSS height); only width-driven `//size:`/`//view:` still apply.
+- **Every minimize/expand runs the full render** (`refresh()`: nodes + edges +
+  handles rebuilt from scratch), the same path used after every other change.
 
 ## Files changed vs upstream
 

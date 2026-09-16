@@ -166,8 +166,6 @@ export default class DbmlErdPlugin extends Plugin {
       }
       el.empty();
       const wrap = el.createDiv({ cls: "dbml-erd-wrap" });
-      const hMatch = source.match(/\/\/\s*(?:canvas-)?height:\s*(\d+)/i);
-      const height = hMatch ? parseInt(hMatch[1], 10) : undefined;
       const savedPos = parsePositions(source);
       const view = parseView(source);
       const size = parseSize(source);
@@ -184,7 +182,6 @@ export default class DbmlErdPlugin extends Plugin {
       };
       ctx.addChild(
         new Diagram(wrap, model, layoutForInstance, {
-          height,
           plugin: this,
           ctx,
           el,
@@ -609,23 +606,17 @@ class Diagram extends MarkdownRenderChild {
     for (const t of this.model.tables) {
       const p = base[t.name];
       if (!p) continue;
-      const min = this.isMinimized(t.name);
       const h = this.effH(t);
-      let y = p.y;
-      if (!min) {
-        let dy = 0;
-        for (const m of this.model.tables) {
-          if (!this.isMinimized(m.name)) continue;
-          const mp = base[m.name];
-          if (!mp) continue;
-          const overlapX =
-            p.x < mp.x + NODE_W && p.x + NODE_W > mp.x;
-          if (mp.y + HEAD_H <= p.y + 1e-6 && overlapX)
-            dy += HEAD_H + m.cols.length * ROW_H - HEAD_H;
-        }
-        y = p.y - dy;
+      let dy = 0;
+      for (const m of this.model.tables) {
+        if (!this.isMinimized(m.name)) continue;
+        const mp = base[m.name];
+        if (!mp) continue;
+        const overlapX = p.x < mp.x + NODE_W && p.x + NODE_W > mp.x;
+        if (mp.y < p.y && overlapX)
+          dy += HEAD_H + m.cols.length * ROW_H - HEAD_H;
       }
-      out[t.name] = { x: p.x, y, w: NODE_W, h };
+      out[t.name] = { x: p.x, y: p.y - dy, w: NODE_W, h };
     }
     this.compactPos = out;
   }
@@ -637,9 +628,8 @@ class Diagram extends MarkdownRenderChild {
     if (this.minimized.has(name)) this.minimized.delete(name);
     else this.minimized.add(name);
     this.rebuildFold();
-    this.redrawNodes();
-    this.redrawEdges();
-    this.redrawHandles();
+    // re-render completo (nodos + aristas + handles), como el resto de cambios
+    this.refresh();
   }
 
   // abre el diagrama en un overlay a pantalla completa (ErdWindowModal), con el
