@@ -404,12 +404,14 @@
 }
 
 /* tabla revelada en vivo (modo normal, y también la vigilada dentro del modo
-   enfoque): borde naranja grueso y sólido = la que se está vigilando. */
+   enfoque): borde grueso y sólido en el MISMO acento por defecto que la
+   cabecera/propiedad enfocada usa (var(--interactive-accent)) = la que se
+   está vigilando. */
 .dbml-node-live .dbml-body {
-  stroke: #ff8c1a;
+  stroke: var(--interactive-accent);
   stroke-width: 4;
-  fill: color-mix(in srgb, #ff8c1a 5%, transparent);
-  filter: drop-shadow(0 0 5px rgba(255, 140, 26, 0.5));
+  fill: color-mix(in srgb, var(--interactive-accent) 5%, transparent);
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--interactive-accent) 50%, transparent));
 }
 
 /* fila de columna subrayada en vivo (la que edita el cursor) */
