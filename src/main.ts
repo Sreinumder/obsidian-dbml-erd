@@ -740,6 +740,52 @@ class Diagram extends MarkdownRenderChild {
 
   // ruteo manhattan (para drag): Z entre puertos de columna, eligiendo un canal
   // vertical que no atraviese otras tablas.
+  // bucle de autoreferencia (from === to): una "U" que sale por el lado derecho
+  // de la tabla y vuelve a entrar por él mismo, sin depender de ELK. Funciona
+  // idéntico minimizada (ay === by → el bucle lo da el desplazamiento rise) y
+  // en forma expandida (dos filas distintas → U entre ambas filas).
+  private selfLoop(r: Ref): { pts: Pt[]; aSide: string; bSide: string } | null {
+    const A = this.px(r.from);
+    if (!A) return null;
+    const ay = A.y + this.colRowY(r.from, r.fromCol);
+    const by = A.y + this.colRowY(r.to, r.toCol);
+    const ex = A.x + NODE_W;
+    const stub = 18;
+    const ex2 = ex + stub;
+    // altura mínima del bucle cuando ambos puertos coinciden (minimizada: todos
+    // aterrizan en el centro de la cabecera).
+    const rise = Math.abs(by - ay) < 10 ? 16 : 0;
+    const botY = Math.max(ay, by) + rise;
+    const rects = this.tableRects([r.from]);
+    // canal vertical libre a la derecha del stub: se aleja hasta no cruzar nada.
+    let off = 16;
+    while (off < 300) {
+      const cx = ex2 + off;
+      const lib =
+        !this.segHitsRects(ex, ay, ex2, ay, rects) &&
+        !this.segHitsRects(ex2, ay, cx, ay, rects) &&
+        !this.segHitsRects(cx, ay, cx, botY, rects) &&
+        !this.segHitsRects(cx, botY, ex2, botY, rects) &&
+        !this.segHitsRects(ex2, botY, ex, by, rects);
+      if (lib) break;
+      off += 8;
+    }
+    const cx = ex2 + off <= ex + stub + 300 ? ex2 + off : ex2 + 160;
+    return {
+      aSide: "E",
+      bSide: "E",
+      pts: [
+        { x: ex, y: ay },
+        { x: ex2, y: ay },
+        { x: cx, y: ay },
+        { x: cx, y: botY },
+        { x: ex2, y: botY },
+        { x: ex2, y: by },
+        { x: ex, y: by },
+      ],
+    };
+  }
+
   private manhattan(r: Ref): { pts: Pt[]; aSide: string; bSide: string } | null {
     const A = this.px(r.from);
     const B = this.px(r.to);
@@ -894,6 +940,13 @@ class Diagram extends MarkdownRenderChild {
   // 2) manhattan (si algún extremo fue movido)
   // 3) ruta ELK original
   private edgePts(r: Ref, i: number): Pt[] | null {
+    // autoreferencia (from === to): siempre re-ruteada con selfLoop, tanto en
+    // forma minimizada como expandida — ELK no emite una ruta estable para un
+    // bucle propio (se quedaba desposicionada al alternar).
+    if (r.from === r.to) {
+      const s = this.selfLoop(r);
+      return s ? s.pts : null;
+    }
     const custom = this.customEdges[this.edgeKey(r)];
     if (custom && custom.length) return this.routeWithWaypoints(r, custom);
     // en modo enfoque las tablas se re-dispersaron (layoutPos): la ruta ELK
