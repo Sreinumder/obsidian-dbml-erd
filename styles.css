@@ -395,17 +395,20 @@
   border-color: var(--interactive-accent);
 }
 
-/* tabla enfocada (modo enfoque) */
+/* tabla enfocada (modo enfoque): borde naranja grueso y sólido */
 .dbml-node-focus .dbml-body {
-  stroke: var(--interactive-accent);
-  stroke-width: 2.5;
+  stroke: #ff8c1a;
+  stroke-width: 4;
+  fill: color-mix(in srgb, #ff8c1a 6%, transparent);
+  filter: drop-shadow(0 0 5px rgba(255, 140, 26, 0.55));
 }
 
-/* tabla revelada en vivo (modo normal): resaltado discontinuo */
+/* tabla revelada en vivo (modo normal): borde naranja grueso y sólido */
 .dbml-node-live .dbml-body {
-  stroke: var(--text-accent);
-  stroke-width: 2;
-  stroke-dasharray: 6 4;
+  stroke: #ff8c1a;
+  stroke-width: 4;
+  fill: color-mix(in srgb, #ff8c1a 5%, transparent);
+  filter: drop-shadow(0 0 5px rgba(255, 140, 26, 0.5));
 }
 
 /* fila de columna subrayada en vivo (la que edita el cursor) */
