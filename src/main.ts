@@ -954,6 +954,7 @@ class Diagram extends MarkdownRenderChild {
     if (
       this.routingMode === "manhattan" ||
       this.layoutPos ||
+      this.compactPos ||
       this.movedTables.has(r.from) ||
       this.movedTables.has(r.to) ||
       this.isMinimized(r.from) ||
