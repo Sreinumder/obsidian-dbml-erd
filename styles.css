@@ -19,8 +19,31 @@
   background-size: 22px 22px;
   cursor: grab;
 }
-.dbml-erd-canvas.panning {
+.dbml-erd-canvas.panning,
+.dbml-erd-canvas.panning .dbml-node {
   cursor: grabbing;
+}
+
+/* incrustado en la nota: diagrama ESTÁTICO (toda la interacción vive en la
+   ventana; un clic en cualquier punto la abre). */
+.dbml-erd-canvas.dbml-static,
+.dbml-erd-canvas.dbml-static .dbml-erd-svg,
+.dbml-erd-canvas.dbml-static .dbml-node {
+  cursor: pointer;
+}
+.dbml-static-hint {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 3;
+  font-size: 11px;
+  color: var(--text-faint);
+  background: var(--background-primary);
+  background: color-mix(in srgb, var(--background-primary) 82%, transparent);
+  border-radius: 4px;
+  padding: 2px 6px;
+  pointer-events: none;
+  opacity: 0.85;
 }
 
 .dbml-erd-svg {
@@ -28,11 +51,22 @@
   inset: 0;
   width: 100%;
   height: 100%;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.dbml-erd-svg * {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* tablas */
 .dbml-node {
   cursor: move;
+}
+/* layout bloqueado (default): sobre las tablas el cursor es de pan, igual que
+   en el fondo */
+.dbml-erd-canvas.dbml-locked .dbml-node {
+  cursor: grab;
 }
 .dbml-body {
   fill: var(--background-secondary);
@@ -61,6 +95,8 @@
 }
 .dbml-col.pk {
   font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 .dbml-type {
   fill: var(--text-muted);
@@ -94,6 +130,12 @@
 .dbml-edge.custom {
   stroke-dasharray: none;
 }
+/* última arista usada para vigilar/emigrar (watch): resaltada */
+.dbml-edge.live {
+  stroke: var(--interactive-accent);
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--interactive-accent) 55%, transparent));
+}
 /* path invisible y ancho para tocar/arrastrar la arista (sobre todo en táctil) */
 .dbml-edge-hit {
   fill: none;
@@ -126,11 +168,14 @@
   fill: var(--background-primary);
 }
 
-/* toolbar */
+/* toolbar (esquina inferior izquierda: la superior derecha la ocupa el botón
+   nativo "Edit this block" de Obsidian, que así queda siempre accesible) */
 .dbml-erd-toolbar {
   position: absolute;
-  top: 10px;
-  right: 12px;
+  top: auto;
+  right: auto;
+  bottom: 10px;
+  left: 12px;
   display: flex;
   gap: 6px;
   z-index: 5;
@@ -149,6 +194,344 @@
 .dbml-erd-toolbar button:hover {
   border-color: var(--interactive-accent);
 }
+.dbml-erd-toolbar button[data-wide] {
+  width: auto;
+  padding: 0 8px;
+  font-size: 13px;
+}
+.dbml-erd-toolbar button.on {
+  background: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+.dbml-erd-toolbar button.focus-exit {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+/* etiqueta de tabla(s) enfocada(s) en la barra, p.ej. "<Warehouses>" */
+.dbml-focus-label {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  align-self: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 0 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+  user-select: none;
+}
+/* en modo normal actúa de navegador (clic = menú de tablas) */
+.dbml-focus-label.dbml-nav {
+  cursor: pointer;
+}
+.dbml-focus-label.dbml-nav:hover {
+  border-color: var(--interactive-accent);
+  color: var(--text-normal);
+}
+
+/* porcentaje de zoom en la barra (escala de la letra): clicable, abre el menú
+   de zooms estándar */
+.dbml-zoom-pct {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 46px;
+  height: 30px;
+  padding: 0 6px;
+  box-sizing: border-box;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  user-select: none;
+}
+.dbml-zoom-pct:hover {
+  border-color: var(--interactive-accent);
+}
+
+/* menú de zooms estándar (aparece al hacer clic en el porcentaje) */
+.dbml-zoom-menu {
+  position: absolute;
+  bottom: 48px;
+  left: 12px;
+  z-index: 6;
+  width: 110px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+  padding: 4px;
+}
+.dbml-zoom-menu-item {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  text-align: right;
+}
+.dbml-zoom-menu-item:hover {
+  background: var(--background-modifier-hover);
+}
+.dbml-zoom-menu-item.active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-weight: 700;
+}
+
+/* dropdown de búsqueda de tablas (sustituye al select de la barra) */
+.dbml-dd {
+  position: absolute;
+  bottom: 48px;
+  left: 12px;
+  z-index: 6;
+  width: 260px;
+  max-height: 60%;
+  overflow: auto;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+  padding-bottom: 6px;
+}
+.dbml-dd-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: block;
+  width: calc(100% - 16px);
+  margin: 8px;
+  padding: 6px 8px;
+  box-sizing: border-box;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 12px;
+}
+.dbml-dd-section {
+  display: block;
+  margin: 4px 8px 2px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  user-select: none;
+}
+.dbml-dd-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 4px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.dbml-dd-row:hover {
+  background: var(--background-modifier-hover);
+}
+.dbml-dd-row.watched {
+  outline: 1px solid var(--text-accent);
+  outline-offset: -1px;
+}
+.dbml-dd-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.dbml-dd-act {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  padding: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 5px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 12px;
+  cursor: pointer;
+}
+.dbml-dd-row.focused .dbml-dd-name {
+  color: var(--text-accent);
+}
+.dbml-dd-empty {
+  margin: 8px;
+  font-size: 12px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+/* navegador de tablas del toolbar: ◀ <select> ▶ */
+.dbml-nav-prev {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.dbml-nav-prev select {
+  max-width: 160px;
+  height: 30px;
+  padding: 0 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 12px;
+  cursor: pointer;
+}
+.dbml-nav-prev select:hover {
+  border-color: var(--interactive-accent);
+}
+
+/* tabla enfocada (modo enfoque): sutil - solo marca que pertenece al
+   subconjunto en foco; NO compite con el naranja de la vigilada. */
+.dbml-node-focus .dbml-body {
+  stroke: var(--background-modifier-border);
+  stroke-width: 1.5;
+  fill: color-mix(in srgb, var(--background-modifier-border) 8%, transparent);
+}
+
+/* tabla revelada en vivo (modo normal, y también la vigilada dentro del modo
+   enfoque): borde grueso y sólido en el MISMO acento por defecto que la
+   cabecera/propiedad enfocada usa (var(--interactive-accent)) = la que se
+   está vigilando. */
+.dbml-node-live .dbml-body {
+  stroke: var(--interactive-accent);
+  stroke-width: 4;
+  fill: color-mix(in srgb, var(--interactive-accent) 5%, transparent);
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--interactive-accent) 50%, transparent));
+}
+
+/* fila de columna subrayada en vivo (la que edita el cursor) */
+.dbml-row-live {
+  fill: color-mix(in srgb, var(--text-accent) 18%, transparent);
+  stroke: var(--text-accent);
+  stroke-width: 1.5;
+}
+
+/* contadores de referencias en la cabecera */
+.dbml-ref-badge {
+  cursor: pointer;
+}
+.dbml-ref-badge-bg {
+  fill: var(--background-primary);
+  stroke: var(--background-modifier-border);
+  stroke-width: 1;
+  pointer-events: all;
+}
+.dbml-ref-badge.in .dbml-ref-badge-bg {
+  stroke: var(--text-accent);
+}
+.dbml-ref-badge-txt {
+  fill: var(--text-normal);
+  font-size: 10px;
+  font-weight: 700;
+  pointer-events: none;
+}
+.dbml-ref-badge.in .dbml-ref-badge-txt {
+  fill: var(--text-accent);
+}
+
+/* botón de minimizar/expandir tabla (solo cabecera, sin propiedades) */
+.dbml-fold-btn {
+  cursor: pointer;
+}
+.dbml-fold-btn-bg {
+  fill: transparent;
+  stroke: var(--background-modifier-border);
+  stroke-width: 1;
+  pointer-events: all;
+}
+.dbml-fold-btn:hover .dbml-fold-btn-bg {
+  fill: var(--background-modifier-hover);
+  stroke: var(--text-accent);
+}
+.dbml-fold-btn-txt {
+  fill: currentColor;
+  opacity: 0.7;
+  font-size: 11px;
+  pointer-events: none;
+}
+.dbml-fold-btn:hover .dbml-fold-btn-txt {
+  opacity: 1;
+}
+/* tabla minimizada: apagada levemente (solo queda la cabecera) */
+.dbml-node-min .dbml-head-txt {
+  font-weight: 600;
+}
+
+/* panel de referencias (lista entrantes/salientes) */
+.dbml-refpanel {
+  position: absolute;
+  z-index: 6;
+  min-width: 220px;
+  max-width: 340px;
+  max-height: 60%;
+  overflow: auto;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-s);
+  padding: 6px 8px;
+}
+.dbml-refpanel-head {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  padding: 2px 4px 6px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  margin-bottom: 4px;
+}
+.dbml-refpanel-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.dbml-refpanel-row:hover {
+  background: var(--background-modifier-hover);
+}
+/* fila cuyo destino ya pertenece al modo enfoque: se remarca */
+.dbml-refpanel-row.focused {
+  background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+  outline: 1px solid var(--text-accent);
+  outline-offset: -1px;
+}
+.dbml-refpanel-row.focused .dbml-refpanel-target {
+  color: var(--text-accent);
+}
+.dbml-refpanel-arrow {
+  font-weight: 700;
+  color: var(--text-accent);
+}
+.dbml-refpanel-target {
+  font-weight: 600;
+  font-size: 13px;
+}
+.dbml-refpanel-cols {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--font-monospace);
+}
+.dbml-refpanel-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 4px;
+}
 
 /* input de color oculto fuera de pantalla (estilos estáticos en CSS, no por JS) */
 .dbml-color-input {
@@ -165,4 +548,151 @@
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+}
+
+/* ---- ventana ERD (overlay a pantalla completa con panel de código) ---- */
+.erd-window-container.modal-container {
+  z-index: 100;
+}
+/* el botón ✕ nativo del modal no aporta nada: ya existe el botón Cerrar */
+.erd-window-container .modal-close-button {
+  display: none;
+}
+.erd-window.modal {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: 100%;
+  margin: 0;
+  padding: 0;
+  border-radius: 0;
+  background: var(--background-primary);
+}
+.erd-window-content.modal-content {
+  height: 100%;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.erd-window-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.erd-window-title {
+  margin-right: auto;
+  font-weight: 700;
+}
+/* desplegable del sistema de layout en la cabecera de la ventana */
+.erd-window-layout-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  user-select: none;
+}
+.erd-window-layout {
+  max-width: 220px;
+  padding: 4px 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 12px;
+}
+.erd-window-btn {
+  padding: 4px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+.erd-window-btn:hover {
+  border-color: var(--interactive-accent);
+}
+.erd-window-btn.is-active,
+.erd-window-exit {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+/* candado del layout (bloquea el arrastre de tablas) */
+.erd-window-lock {
+  font-size: 14px;
+  padding: 4px 10px;
+}
+.erd-window-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.erd-window-draw {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+.erd-window-draw .dbml-erd-canvas {
+  height: 100%;
+  --dbml-erd-height: 100%;
+  resize: none;
+}
+.erd-window-split {
+  flex: none;
+  width: 6px;
+  cursor: col-resize;
+  border-left: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+}
+.erd-window-split:hover {
+  background: var(--interactive-accent);
+}
+.erd-window-split.hidden {
+  display: none;
+}
+.erd-window-code {
+  flex: none;
+  width: 42%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  transition: width 0.15s ease;
+}
+.erd-window-code.hidden {
+  width: 0 !important;
+  border-left: none;
+}
+/* miga de pan: tabla · columna bajo el cursor, encima del editor */
+.erd-window-crumb {
+  flex: none;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-accent);
+  background: var(--background-primary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+.erd-window-editor {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  resize: none;
+  border: none;
+  outline: none;
+  padding: 12px;
+  white-space: pre;
+  overflow: auto;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  box-sizing: border-box;
 }

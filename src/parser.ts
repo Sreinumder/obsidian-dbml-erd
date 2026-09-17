@@ -520,6 +520,52 @@ export function setRefOpInBlock(
 
 // ---- posiciones / vista persistidas como comentarios ----
 
+// Sistemas de layout disponibles (elegibles desde el desplegable y persistidos
+// por bloque como `// @layout <kind>`).
+export type LayoutKind = "layered-lr" | "layered-tb";
+
+export const LAYOUT_KINDS: LayoutKind[] = ["layered-lr", "layered-tb"];
+
+export function parseLayout(src: string): LayoutKind | undefined {
+  const m = src.match(/\/\/\s*@layout\s+([A-Za-z0-9_-]+)/);
+  if (!m) return undefined;
+  const kind = m[1] as LayoutKind;
+  return LAYOUT_KINDS.includes(kind) ? kind : undefined;
+}
+
+export function layoutLine(kind: LayoutKind): string {
+  return `// @layout ${kind}`;
+}
+
+// El layout nace BLOQUEADO (default seguro para "ver sin editar"). La anotación
+// `// @layoutLocked` fija el estado explícito; `// @layoutLocked false` lo
+// desbloquea (se persiste solo al desbloquear; su ausencia = bloqueado).
+export function parseLayoutLocked(src: string): boolean {
+  const m = src.match(/\/\/\s*@layoutLocked\b\s*(true|false)?\b/i);
+  if (!m) return true;
+  return m[1] ? m[1].toLowerCase() === "true" : true;
+}
+
+export function layoutLockLine(locked: boolean): string {
+  return locked ? `// @layoutLocked` : `// @layoutLocked false`;
+}
+
+// foco persistido en el archivo: `// @focusOn TablaA,TablaB` lista las tablas
+// enfocadas; línea ausente = diagrama completo.
+export function parseFocusOn(src: string): string[] | null {
+  const m = src.match(/\/\/\s*@focusOn\b\s*([^\n]*)/i);
+  if (!m) return null;
+  const names = m[1]
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return names.length ? names : null;
+}
+
+export function focusOnLine(names: string[]): string {
+  return `// @focusOn ${names.join(",")}`;
+}
+
 export function parsePositions(
   src: string
 ): Record<string, { x: number; y: number }> {

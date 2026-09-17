@@ -1,12 +1,11 @@
-// Layout con elkjs: posiciona tablas (layered) y rutea aristas ortogonalmente
-// conectándolas a puertos ubicados en la fila de cada columna.
+// Layout: elkjs (layered) para nodos y el router ortogonal propio del Diagram.
 import type {
   ELK as ElkInstance,
   ElkNode,
   ElkPort,
   ElkExtendedEdge,
 } from "elkjs/lib/elk-api";
-import type { Model } from "./parser";
+import type { LayoutKind, Model } from "./parser";
 
 export const ROW_H = 28;
 export const HEAD_H = 36;
@@ -23,11 +22,14 @@ export interface NodePos {
   h: number;
 }
 export interface EdgePath {
-  pts: Pt[]; // polilínea ruteada por ELK (coords absolutas)
+  pts: Pt[]; // polilínea ruteada (coords absolutas)
 }
 export interface LayoutResult {
   nodes: Record<string, NodePos>;
   edges: EdgePath[]; // mismo orden que model.refs
+  // "elk" = las aristas vienen ruteadas por ELK (jerárquico);
+  // "manhattan" = el Diagram las rutea con su router ortogonal de 90°.
+  routes: "elk" | "manhattan";
 }
 
 // ELK (~1.6 MB) se carga perezosamente en el primer layout: el import()
@@ -54,7 +56,10 @@ function colRowY(model: Model, table: string, col: string): number {
   return HEAD_H + idx * ROW_H + ROW_H / 2;
 }
 
-export async function computeLayout(model: Model): Promise<LayoutResult> {
+export async function computeLayout(
+  model: Model,
+  kind: LayoutKind = "layered-lr"
+): Promise<LayoutResult> {
   const children: ElkNode[] = model.tables.map((t) => {
     const h = tableHeight(t.cols.length);
     const ports: ElkPort[] = [];
@@ -90,7 +95,7 @@ export async function computeLayout(model: Model): Promise<LayoutResult> {
     id: "root",
     layoutOptions: {
       "elk.algorithm": "layered",
-      "elk.direction": "RIGHT",
+      "elk.direction": kind === "layered-tb" ? "DOWN" : "RIGHT",
       "elk.edgeRouting": "ORTHOGONAL",
       "elk.layered.spacing.nodeNodeBetweenLayers": "120",
       "elk.spacing.nodeNode": "50",
@@ -123,7 +128,7 @@ export async function computeLayout(model: Model): Promise<LayoutResult> {
   const edgePaths: EdgePath[] = model.refs.map((_, i) => ({
     pts: byId["e" + i] ?? [],
   }));
-  return { nodes, edges: edgePaths };
+  return { nodes, edges: edgePaths, routes: "elk" };
 }
 
 function port(id: string, x: number, y: number, side: string): ElkPort {
