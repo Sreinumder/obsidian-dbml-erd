@@ -1,9 +1,9 @@
 {
-  "id": "dbml-erd",
+  "id": "dbml-erd-explorer",
   "name": "DBML ER Diagrams",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "minAppVersion": "1.6.0",
-  "description": "Render dbml code blocks as entity-relationship diagrams with orthogonal, dbdiagram.io-style routing.",
+  "description": "Fork of Wilmar Rojas Avendaño's dbml erd plugin that Render dbml code blocks as entity-relationship diagrams with orthogonal, dbdiagram.io-style routing. additionally this fork adds navigation through arrows or badges and features like focusing on single table and so on. Ability to edit the code and directly reflect the changes immediately.",
   "author": "Wilmar Rojas Avendaño",
   "isDesktopOnly": false
 }
